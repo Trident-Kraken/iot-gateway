@@ -53,8 +53,31 @@ int main(int argc, char *argv[])
         return EXIT_FAILURE;
     }
 
+    /* 配置范围校验：非法值直接拒绝启动，避免静默截断/误配。 */
+    if (server_port <= 0 || server_port > 65535) {
+        LOG_ERROR("invalid server_port=%d (must be 1..65535)", server_port);
+        logger_destroy();
+        config_free();
+        return EXIT_FAILURE;
+    }
+
+    if (thread_pool_size <= 0 || thread_pool_size > 64) {
+        LOG_ERROR("invalid thread_pool_size=%d (must be 1..64)",
+                  thread_pool_size);
+        logger_destroy();
+        config_free();
+        return EXIT_FAILURE;
+    }
+
     mqtt_broker = config_get_string("mqtt_broker", "localhost");
     mqtt_port = config_get_int("mqtt_port", 1883);
+
+    if (mqtt_port <= 0 || mqtt_port > 65535) {
+        LOG_ERROR("invalid mqtt_port=%d (must be 1..65535)", mqtt_port);
+        logger_destroy();
+        config_free();
+        return EXIT_FAILURE;
+    }
 
     LOG_INFO("iot-gateway starting...");
     LOG_INFO("config loaded from %s", config_path);
