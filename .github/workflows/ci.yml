@@ -41,3 +41,5 @@ jobs:
           python3 tests/integration/device_simulator.py --devices 1 --freq 2 --duration 2 --stats
           wait $SUB_PID
           test -s /tmp/mqtt_msg.txt
+          # CMD_CONFIG（0x03）请求/响应式下行验证
+          python3 tests/integration/config_downlink_test.py 127.0.0.1 8080

@@ -37,7 +37,7 @@
 |---|---|---|---|---|
 | `0x01` | `CMD_SENSOR_DATA` | 设备 → 网关 | JSON 字符串 | ✅ 已实现（MQTT 上报 `sensor/data`） |
 | `0x02` | `CMD_HEARTBEAT` | 设备 → 网关 | 通常为空 | ✅ 已实现（刷新活跃时间） |
-| `0x03` | `CMD_CONFIG` | 网关 → 设备（下行） | JSON/配置数据 | ⚠️ 预留，未实现业务处理 |
+| `0x03` | `CMD_CONFIG` | 设备 → 网关（配置请求） / 网关 → 设备（下行响应） | JSON/配置数据 | ✅ 已实现（请求/响应式下行，见 §6） |
 
 ## 3. CRC16
 
@@ -94,3 +94,26 @@ AA 55 00 4C 01 7B 22 64 65 76 69 63 65 5F 69 64 22 3A 20 22 64 65 76 2D 30 30 31
 ```
 
 其中 `00 4C` 是长度（76 字节 JSON Payload），`B2 83` 是 CRC。
+
+---
+
+## 6. CMD_CONFIG 配置下行（请求/响应）
+
+协议表 §2 中 `0x03 CMD_CONFIG` 原始方向为「网关 → 设备（下行）」。当前网关没有云端
+下行触发源（MQTT 侧仅实现 publish、不实现 subscribe），也没有设备配置数据源，因此
+落地为**请求/响应式下行**：
+
+```
+设备 ── CMD_CONFIG 请求（Payload 可为空或 JSON）──▶ 网关
+网关 ── CMD_CONFIG 响应（Payload = 默认设备配置 JSON）──▶ 设备
+```
+
+- 设备发送 `0x03` 帧（Payload 通常为空，表示「请求我的配置」）。
+- 网关 `business_handler` 的 `handle_config()` 打包默认配置 JSON
+  （`{"sampling_interval":5,"upload_freq":2,"heartbeat_interval":5}`），
+  用 `packet_encode()` 编码为 `0x03` 帧。
+- 下行帧经 self-pipe 委托 **epoll 线程**发送（`epoll_worker_request_send()`），
+  非阻塞 + `MSG_NOSIGNAL`，并携带 fd + generation 双重匹配，连接已关闭或 fd 被
+  新连接复用时静默丢弃（best-effort，可重发）。
+- 验证：`tests/integration/config_downlink_test.py`（连接网关 → 发空 `0x03` 请求 →
+  校验回帧的帧头/CRC/命令字/配置 JSON）。

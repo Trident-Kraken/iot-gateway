@@ -170,10 +170,12 @@ iot-gateway/
 
 ### 5.5 business_handler & mqtt_client
 
-- `business_handler`：工作线程取任务后按 `task->frame[4]` 提取命令字，查 `g_cmd_handlers[256]` 函数指针表 O(1) 分发；未注册命令记 `LOG_ERROR` 并丢帧（当前注册 2/256：`CMD_SENSOR_DATA`、`CMD_HEARTBEAT`）。
+- `business_handler`：工作线程取任务后按 `task->frame[4]` 提取命令字，查 `g_cmd_handlers[256]` 函数指针表 O(1) 分发；未注册命令记 `LOG_ERROR` 并丢帧（当前注册 3/256：`CMD_SENSOR_DATA`、`CMD_HEARTBEAT`、`CMD_CONFIG`）。
 - JSON 解析使用 `strstr`+`snprintf` 手写（`json_extract()`），不引入 cJSON；重打包后用 `mqtt_publish` 上报 `sensor/data`。
-- `mqtt_client`：静态单例 `g_mqtt` + `pthread_mutex_t` 封装 libmosquitto，QoS0 fire-and-forget；publish 失败即 fast-fail 丢消息，**不阻塞工作线程**。
-- 异步重连：`mqtt_publish` 检测到断开时 `pthread_cond_signal` 唤醒专用重连线程，由它做带退避+jitter 的 `mosquitto_connect` 重试（最多 3 次）。
+- `CMD_CONFIG`（0x03）为请求/响应式下行：设备发配置请求 → 网关回 `0x03` 帧（默认设备配置 JSON）。下行帧经 self-pipe 委托 epoll 线程发送（fd + generation 双重匹配，best-effort，可重发）。
+- `mqtt_client`：静态单例 `g_mqtt` + `pthread_mutex_t` 封装 libmosquitto；单一 MQTT 管理线程驱动 `mosquitto_loop()`（收发/PINGREQ/keepalive/断线重连）；publish QoS 由配置 `mqtt_qos` 决定（0/1/2，默认 0），**不阻塞工作线程**。
+- 离线缓存：broker 不可达或 publish 失败时消息进入有界环形缓存（`MQTT_CACHE_MAX`=512，满淘汰最旧），管理线程重连成功后锁外冲刷，不再 fast-fail 丢消息。
+- QoS1/2 的确认与重传由 `mosquitto_loop()` 的 inflight 机制处理，`on_publish` 回调记录每次 PUBACK/PUBCOMP。
 - 禁止直接阻塞 I/O，所有网络发布必须是非阻塞或交给独立发布线程。
 
 ---
@@ -219,7 +221,7 @@ set(CMAKE_C_FLAGS "-Wall -Wextra")
 
 1. **命名前缀不统一**：`gw_` 前缀未强制推行，当前函数名风格混杂，后续视时间决定是否统一。
 2. **关键路径动态分配**：连接上下文、任务节点仍使用 `calloc/malloc`，后续可引入固定大小对象池。
-3. **MQTT 仅做最小可用**：`mqtt_client` 已实现 QoS0 publish + 异步重连线程；`business_handler` 已接通 `CMD_SENSOR_DATA`/`CMD_HEARTBEAT`（2/256 handler）。待补项：QoS1/2 与确认重传、broker 不可达时的离线消息缓存、未注册命令（如 `CMD_CONFIG` 下行）的业务处理、`mosquitto_loop_*` 心跳循环未运行（当前 `MQTT_KEEPALIVE_SEC=30` 仅在 connect 时握手，长连接无 PINGREQ，broker 可能因空闲超时断开）。
+3. **MQTT 已达成最小可用**：`mqtt_client` 实现 QoS0/1/2 publish（配置 `mqtt_qos`）+ 管理线程驱动 `mosquitto_loop()` + 断线自动重连 + 有界离线消息缓存（重连后冲刷）；`business_handler` 已接通 `CMD_SENSOR_DATA`/`CMD_HEARTBEAT`/`CMD_CONFIG`（3/256 handler，含请求/响应式配置下行）。待补项：QoS1/2 显式重传策略与离线消息持久化（当前缓存仅内存、进程重启即丢）、下行配置的真实数据源（当前回发固定默认 JSON）。
 
 ---
 

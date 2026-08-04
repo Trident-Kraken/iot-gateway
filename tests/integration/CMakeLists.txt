@@ -15,6 +15,7 @@ add_test(
     COMMAND ${Python3_EXECUTABLE} -m py_compile
             ${CMAKE_CURRENT_SOURCE_DIR}/device_simulator.py
             ${CMAKE_CURRENT_SOURCE_DIR}/stress_test.py
+            ${CMAKE_CURRENT_SOURCE_DIR}/config_downlink_test.py
 )
 
 add_test(

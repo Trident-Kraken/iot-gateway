@@ -13,6 +13,13 @@
 - `fix(config)`: 校验 server_port / thread_pool_size / mqtt_port 范围，非法配置拒绝启动（原静默截断 + 日志误导）。
 - `fix(logger)`: 日志目录缺失时降级 stderr，网关不再因 `logs/` 不存在而启动失败。
 
+### 新增（Day3 P0：MQTT 最小可用收尾）
+
+- `feat(config)`: 实现 `CMD_CONFIG`（0x03）请求/响应式下行——设备发配置请求，网关回发默认设备配置 JSON 帧；下行经 self-pipe 委托 epoll 线程发送，fd + generation 双重匹配防 fd 复用误发（分发表 3/256）。
+- `feat(mqtt)`: broker 不可达时消息进入有界离线缓存（512 条，满淘汰最旧），管理线程重连成功后锁外冲刷，不再 fast-fail 丢消息。
+- `feat(mqtt)`: 新增 `mqtt_qos` 配置（0/1/2，默认 0）贯穿发布链路；注册 `on_publish` 回调记录 PUBACK/PUBCOMP，QoS1/2 确认与重传交由 `mosquitto_loop()` inflight 机制。
+- `fix(epoll)`: self-pipe 消息结构体写入前清零，消除向管道写入未初始化字节（valgrind 告警）。
+
 ## [0.1.0] - 2026-08-04
 
 ### 新增

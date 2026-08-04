@@ -47,6 +47,7 @@ cmake --build build
 | `[log]` | `log_level` | INFO | 日志级别：DEBUG/INFO/ERROR |
 | `[mqtt]` | `mqtt_broker` | localhost | Broker 地址 |
 | `[mqtt]` | `mqtt_port` | 1883 | Broker 端口 |
+| `[mqtt]` | `mqtt_qos` | 0 | 发布 QoS（0/1/2；QoS1/2 确认与重传由 `mosquitto_loop` 处理） |
 
 ## 4. 启动
 

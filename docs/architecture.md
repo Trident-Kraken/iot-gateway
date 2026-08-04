@@ -55,9 +55,10 @@
                └─────────────────────────────────────────────┘
 
                ┌─────────────────────────────────────────────┐
-               │  mqtt 异步重连线程                            │
-               │  → 条件变量唤醒后阻塞式重连                   │
-               │  → worker 线程 publish 永不阻塞（fast-fail）  │
+               │  mqtt 管理线程                                │
+               │  → connect + mosquitto_loop + 断线重连        │
+               │  → 重连后冲刷离线缓存（锁外 publish）          │
+               │  → worker 线程 publish 永不阻塞               │
                └─────────────────────────────────────────────┘
 ```
 
@@ -65,7 +66,9 @@
 
 心跳超时清理链路：heartbeat 线程扫描连接链表 → 持锁收集超时 fd → 出锁后写 self-pipe → epoll 线程读 self-pipe → `connection_close()` 执行完整清理（epoll_ctl DEL → parser_unregister → conn_manager_remove → close → free）。心跳线程不直接 close fd，避免与 epoll 线程的 I/O 操作竞争。
 
-MQTT 重连链路：`mqtt_publish()` 发现连接断开时立即丢弃消息（fast-fail）并唤醒异步重连线程 → 重连线程在后台执行阻塞式重连 → 重连成功后后续 publish 恢复正常。工作线程永不因 broker 不可达而阻塞。
+下行发送链路：self-pipe 除关闭请求外还承载**下行数据帧**（`PIPE_MSG_SEND`，如 `CMD_CONFIG` 配置响应）。工作线程的 `handle_config()` 编码帧后调用 `epoll_worker_request_send(fd, generation, frame, len)`，epoll 线程按 fd + generation 双重匹配确认连接仍是同一代，再非阻塞 `send()`（`MSG_NOSIGNAL`）。所有对客户端 fd 的 I/O 依旧收敛在 epoll 线程，工作线程只写 pipe，避免多线程并发读写同一 socket 与 fd 复用竞态。
+
+MQTT 断连/重连链路：`mqtt_publish()` 发现连接断开或发布失败时，消息进入**有界离线缓存**（512 条，满淘汰最旧）而非丢弃 → MQTT 管理线程在后台执行阻塞式重连（带退避）→ 重连成功后锁外冲刷缓存中的消息（QoS 由 `mqtt_qos` 配置决定）。工作线程永不因 broker 不可达而阻塞。
 
 ## 2. 半解耦设计
 
@@ -85,7 +88,7 @@ I/O 线程负责网络收发、拆包、CRC 校验，在入队前丢弃坏帧；
 | **task_queue** | I/O 线程（写） / 工作线程（读） | struct task | 线程安全 FIFO | `g_mutex + g_cond` |
 | **threadpool** | 工作线程 ×N | task_queue_pop | worker_process_task | 无（任务队列在 pop 内部持锁） |
 | **business_handler** | 工作线程 | 完整帧 | JSON / MQTT publish | 无（MQTT 模块自行保护） |
-| **mqtt_client** | 工作线程（并发） + 重连线程 | topic + payload | mosquitto_publish | `g_mqtt.lock`（publish 快速持锁，重连在独立线程） |
+| **mqtt_client** | 工作线程（并发） + MQTT 管理线程 | topic + payload | mosquitto_publish / 离线缓存 | `g_mqtt.lock`（状态检查/缓存入队快速持锁，网络 I/O 在管理线程） |
 | **config_parser** | main 线程 | INI 文件 | 键值对查询 | 无（单次加载） |
 | **logger** | 所有线程 | msg + level | 日志文件 | `g_log_mutex` |
 
@@ -94,9 +97,9 @@ I/O 线程负责网络收发、拆包、CRC 校验，在入队前丢弃坏帧；
 ```
 conn_manager.lock  →  conn_manager_foreach (遍历期间持有, 微秒级)
 task_queue.lock    →  push / pop (链表操作期间持有, 微秒级)
-mqtt_client.lock   →  publish 状态检查 + mosquitto_publish (快速持锁)
-                       断连时 fast-fail 丢弃消息, 唤醒异步重连线程
-                       重连的阻塞等待在独立线程完成, 不持 publish 锁
+mqtt_client.lock   →  publish 状态检查 + 离线缓存入队 (快速持锁)
+                       断连时消息入缓存, 重连成功后在管理线程锁外冲刷
+                       网络 I/O（connect/loop/publish）均在管理线程, 不持锁
 logger.lock        →  fprintf + fflush + 轮转检查 (每次日志写入持有)
 ```
 
