@@ -27,6 +27,14 @@ cmake --build build
 
 ✅ 零错误、零警告（`-Wall -Wextra`）。
 
+# 合并运行（最终验证）
+
+```bash
+ctest --test-dir build --output-on-failure
+```
+
+✅ **12/12 一次全部通过**（7 项单测/自检 + 5 项集成，总耗时 71.8s），无跳过、无失败。
+
 # Unit Test Result
 
 `ctest --test-dir build`（C 单测 + Python 自检，共 7 项，全部实测通过）：
