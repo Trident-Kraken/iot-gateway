@@ -47,3 +47,11 @@ add_test(
 )
 set_tests_properties(integration_mqtt_offline_cache
                      PROPERTIES TIMEOUT 90 SKIP_RETURN_CODE 77)
+
+# 配置校验：非法配置 fail-fast（临时 cwd，不改仓库 config/）。
+add_test(
+    NAME integration_config_validation
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_config_validation.py
+)
+set_tests_properties(integration_config_validation
+                     PROPERTIES TIMEOUT 60 SKIP_RETURN_CODE 77)
