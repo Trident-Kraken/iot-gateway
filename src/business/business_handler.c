@@ -89,11 +89,15 @@ static int json_extract(const char *json, size_t json_len,
     }
 
     if (*colon == '"') {
-        /* 字符串值: "xxx" */
+        /* 字符串值: "xxx" —— 按 json_len 限界查找收尾引号，
+         * 不依赖调用方缓冲区 NUL 结尾。 */
         colon++;
         start = colon;
-        end = strchr(start, '"');
-        if (end == NULL) {
+        end = start;
+        while (end < json + json_len && *end != '"') {
+            end++;
+        }
+        if (end >= json + json_len) {
             return -1;
         }
     } else {
