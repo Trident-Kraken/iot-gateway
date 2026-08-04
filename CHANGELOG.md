@@ -25,6 +25,34 @@
 - `feat(pool)`: 任务节点固定对象池（2048），`task_queue` push/pop/release 零动态分配；队列从无界链表变为有界（满则 `ENOMEM` 拒绝入队，实现架构文档建议的水位线）。
 - `feat(pool)`: 连接上下文固定对象池（1024），epoll 线程 accept/close 零动态分配；超出容量拒绝 accept 并记日志。
 
+### 修复（Day2 代码 Review）
+
+- `fix(main)`: 统一 teardown 逆序清理（先停工作线程再销毁 MQTT 客户端），修复失败路径并发访问已销毁单例的 use-after-free。
+- `fix(main)`: `epoll_worker_run()` 致命错误时返回 `EXIT_FAILURE`，并补齐 `mqtt_client_destroy()`/`conn_manager_destroy()` 清理。
+- `fix(config)`: `config_get_int` 增加 `INT_MIN/INT_MAX` 溢出检查，超范围值不再静默截断。
+- `fix(business)`: `json_extract` 字符串值按 `json_len` 限界查找，消除对调用方 NUL 结尾的隐式依赖。
+- `fix(packet_decode)`: 增加 `payload_len > PROTOCOL_MAX_PAYLOAD_LEN` 防御，与状态机上限一致。
+- `fix(epoll)`: self-pipe 收到错误/挂起事件时不再走 `connection_close`（其上下文非对象池分配，原先存在误入空闲链的隐患）。
+
+### 重构（Day2 代码 Review）
+
+- `refactor(server)`: 错误路径统一走 `LOG_ERROR`，移除引导期后残留的 `fprintf(stderr)`。
+- `refactor(log)`: 补充 `g_log_level` 全局理由与线程安全不变量注释；传感器上报日志降为 `DEBUG`（消除 991 QPS 下的日志刷屏）。
+- `refactor(comment)`: 还原全仓被压扁的多行注释并修复 `logger.c` 残留 U+FFFD 乱码（与 v1.7 UTF-8 声明对齐）。
+- `refactor(protocol)`: `struct parse_ctx` 转为不透明句柄；删除零调用者 API（`packet_parser_get_ctx`/`crc16_init`）；`PARSER_MAX_*` 移入实现文件。
+- `refactor(threadpool)`: 任务处理改为回调注入（`threadpool_init(num, task_handler)`），消除 utils → business 反向依赖；`on_frame_complete` 移入 `epoll_worker`。
+- `refactor(epoll)`: `is_listen` 三态 int 改为 `enum conn_role`（CLIENT/LISTEN/PIPE）。
+- `refactor(utils)`: 抽取 `fd_set_nonblocking` 共享工具，消除 server/epoll_worker 重复实现。
+
+### 新增（Day2 代码 Review）
+
+- `test(unit)`: 新增 C 单元测试（`tests/unit`，56 断言）：CRC16 已知向量、协议编解码（含超大 Payload 防御）、RingBuffer 环绕/满拒写、粘包拆包状态机（分片/粘包/坏帧恢复）。
+
+### 文档（Day2 代码 Review）
+
+- 文档与实现同步：QoS 0/1/2（默认 0）、无限重连 + 退避、任务队列有界 2048、`PROTOCOL_MAX_FRAME_SIZE=1031`、AGENTS §2.3 对象池声明修正、心跳语义（任意收包刷新活跃时间）。
+- `docs/interview_qa.md` 新增第 11 问：为什么网关没有全局状态机。
+
 ## [0.1.0] - 2026-08-04
 
 ### 新增
