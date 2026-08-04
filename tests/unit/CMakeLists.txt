@@ -31,3 +31,15 @@ add_executable(test_task_queue
 target_include_directories(test_task_queue PRIVATE ${CMAKE_SOURCE_DIR}/include)
 
 add_test(NAME unit_task_queue COMMAND test_task_queue)
+
+# threadpool 单元测试（并发处理 / 优雅退出）。
+add_executable(test_threadpool
+    test_threadpool.c
+    ${CMAKE_SOURCE_DIR}/src/utils/threadpool.c
+    ${CMAKE_SOURCE_DIR}/src/utils/task_queue.c
+)
+
+target_include_directories(test_threadpool PRIVATE ${CMAKE_SOURCE_DIR}/include)
+target_link_libraries(test_threadpool PRIVATE Threads::Threads)
+
+add_test(NAME unit_threadpool COMMAND test_threadpool)
