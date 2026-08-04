@@ -1,8 +1,6 @@
 #include <stdio.h>
 #include <stdlib.h>
-#include <string.h>
 
-#include <stddef.h>
 #include <stdint.h>
 
 #include "business/business_handler.h"
@@ -109,7 +107,7 @@ int main(int argc, char *argv[])
         return EXIT_FAILURE;
     }
 
-    if (threadpool_init(thread_pool_size) != 0) {
+    if (threadpool_init(thread_pool_size, worker_process_task) != 0) {
         LOG_ERROR("failed to initialize thread pool");
         mqtt_client_destroy();
         logger_destroy();
@@ -178,38 +176,4 @@ int main(int argc, char *argv[])
     config_free();
 
     return rc == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
-}
-
-/*
- * packet_parser 在完整帧组装完毕后调用的回调函数。
- * 帧被转发到工作线程池进行业务处理。
- */
-void on_frame_complete(int fd, const uint8_t *frame, size_t len)
-{
-    struct task t;
-
-    if (frame == NULL || len == 0 || len > sizeof(t.frame)) {
-        LOG_ERROR("on_frame_complete: invalid frame from fd=%d", fd);
-        return;
-    }
-
-    memset(&t, 0, sizeof(t));
-    t.fd = fd;
-
-    /* 记录连接代际号：下行响应（如 CMD_CONFIG）发送前据此防 fd 复用误发。 */
-    if (conn_manager_get_generation(fd, &t.generation) != 0) {
-        /* 理论上不会发生（本回调运行在 epoll 线程、连接尚存活）；
-         * 防御性置 0，使后续下行发送被 generation 匹配拒绝。 */
-        t.generation = 0;
-    }
-
-    t.frame_len = len;
-    memcpy(t.frame, frame, len);
-
-    /* 从协议帧中提取命令字（偏移量 4，见 protocol.h 帧布局）。*/
-    t.cmd = t.frame[4];
-
-    if (threadpool_submit(&t) != 0) {
-        LOG_ERROR("on_frame_complete: threadpool_submit failed for fd=%d", fd);
-    }
 }

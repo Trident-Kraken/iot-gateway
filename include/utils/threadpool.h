@@ -10,17 +10,21 @@ extern "C" {
 /* 当调用方传入 0 或负数时使用的默认工作线程数。 */
 #define THREADPOOL_DEFAULT_THREADS 4
 
+/* 工作线程的任务处理回调（由上层注入，如 business_handler 的 worker_process_task）。 */
+typedef void (*task_handler_t)(struct task *task);
+
 /**
  * @brief 初始化全局线程池。
  *
- * 创建配置数量的工作线程。每个线程等待全局任务队列，弹出任务并处理。
- * 本函数内部也会初始化全局任务队列。
+ * 创建配置数量的工作线程。每个线程等待全局任务队列，弹出任务后交给
+ * @p task_handler 处理。本函数内部也会初始化全局任务队列。
  *
- * @param num_threads 工作线程数量。<= 0 的值选择默认值。
+ * @param num_threads  工作线程数量。<= 0 的值选择默认值。
+ * @param task_handler 任务处理回调（不允许为 NULL）。
  *
  * @return 成功返回 0，失败返回 -1。
  */
-int threadpool_init(int num_threads);
+int threadpool_init(int num_threads, task_handler_t task_handler);
 
 /**
  * @brief 向全局线程池提交一个任务。

@@ -7,8 +7,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "business/business_handler.h"
-
 /*
  * 全局运行标志。
  *
@@ -21,19 +19,19 @@ static atomic_int g_running = 0;
 
 /* 单例线程池状态。 */
 static struct {
-    pthread_t *threads;
-    int        num_threads;
-    int        initialized;
+    pthread_t    *threads;
+    int           num_threads;
+    task_handler_t task_handler; /* 任务处理回调（init 时注入）。 */
+    int           initialized;
 } g_pool;
 
 /**
  * @brief 工作线程主循环。
  *
  * 每个工作线程永远循环，阻塞在 task_queue_pop() 上直到有任务到达或收到
- * 关闭信号。当弹出任务后，工作线程委托给 worker_process_task()
- *（定义在 business_handler.c），它展开帧，通过函数指针表分发到相应的
- * 命令处理器，并执行业务逻辑（传感器数据的 JSON 解析 + MQTT 发布、
- * 心跳刷新等）。
+ * 关闭信号。当弹出任务后，工作线程委托给注册的 task_handler
+ *（threadpool_init 注入，如 business_handler 的 worker_process_task），
+ * 由上层展开帧并通过函数指针表分发到相应的命令处理器。
  */
 static void *worker_thread(void *arg)
 {
@@ -60,7 +58,7 @@ static void *worker_thread(void *arg)
          * 锁粒度：任务处理在任务队列互斥锁外执行。只有队列操作（push/pop）
          * 在锁下进行。这使临界区极小，并允许多个工作线程并行处理任务。
          */
-        worker_process_task(task);
+        g_pool.task_handler(task);
 
         /* 任务节点属对象池，归还而非 free()（零分配热路径）。 */
         task_queue_release(task);
@@ -69,13 +67,20 @@ static void *worker_thread(void *arg)
     return NULL;
 }
 
-int threadpool_init(int num_threads)
+int threadpool_init(int num_threads, task_handler_t task_handler)
 {
     int i;
 
     if (g_pool.initialized) {
         return 0;
     }
+
+    if (task_handler == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    g_pool.task_handler = task_handler;
 
     if (num_threads <= 0) {
         num_threads = THREADPOOL_DEFAULT_THREADS;

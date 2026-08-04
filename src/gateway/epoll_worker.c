@@ -12,6 +12,7 @@
 
 #include "gateway/conn_manager.h"
 #include "utils/logger.h"
+#include "utils/threadpool.h"
 #include "protocol/packet_parser.h"
 #include "gateway/server.h"
 
@@ -638,4 +639,38 @@ int epoll_worker_run(int listen_fd)
     close(epoll_fd);
 
     return -1;
+}
+
+/*
+ * packet_parser 在完整帧组装完毕后调用的回调函数（本文件为 epoll 线程
+ * 上下文）：把完整帧连同连接代际号打包成任务，交给工作线程池处理。
+ */
+void on_frame_complete(int fd, const uint8_t *frame, size_t len)
+{
+    struct task t;
+
+    if (frame == NULL || len == 0 || len > sizeof(t.frame)) {
+        LOG_ERROR("on_frame_complete: invalid frame from fd=%d", fd);
+        return;
+    }
+
+    memset(&t, 0, sizeof(t));
+    t.fd = fd;
+
+    /* 记录连接代际号：下行响应（如 CMD_CONFIG）发送前据此防 fd 复用误发。 */
+    if (conn_manager_get_generation(fd, &t.generation) != 0) {
+        /* 理论上不会发生（本回调运行在 epoll 线程、连接尚存活）；
+         * 防御性置 0，使后续下行发送被 generation 匹配拒绝。 */
+        t.generation = 0;
+    }
+
+    t.frame_len = len;
+    memcpy(t.frame, frame, len);
+
+    /* 从协议帧中提取命令字（偏移量 4，见 protocol.h 帧布局）。 */
+    t.cmd = t.frame[4];
+
+    if (threadpool_submit(&t) != 0) {
+        LOG_ERROR("on_frame_complete: threadpool_submit failed for fd=%d", fd);
+    }
 }
