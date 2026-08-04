@@ -4,6 +4,7 @@
 
 #include <ctype.h>
 #include <errno.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -117,30 +118,30 @@ int config_load(const char *path)
             continue;
         }
 
-       if (g_entry_count >= CONFIG_MAX_ENTRIES) {
-           fprintf(stderr, "config_load: too many entries (max %d)\n",
-                   CONFIG_MAX_ENTRIES);
-           fclose(fp);
-           config_free();
-           errno = ENOSPC;
-           return -1;
-       }
+    if (g_entry_count >= CONFIG_MAX_ENTRIES) {
+        fprintf(stderr, "config_load: too many entries (max %d)\n",
+                CONFIG_MAX_ENTRIES);
+        fclose(fp);
+        config_free();
+        errno = ENOSPC;
+        return -1;
+    }
 
-       g_entries[g_entry_count].key = strdup(key);
-       g_entries[g_entry_count].value = strdup(value);
-       if (g_entries[g_entry_count].key == NULL ||
-           g_entries[g_entry_count].value == NULL) {
-           /* Free whichever strdup succeeded to avoid partial leak. */
-           free(g_entries[g_entry_count].key);
-           free(g_entries[g_entry_count].value);
-           g_entries[g_entry_count].key = NULL;
-           g_entries[g_entry_count].value = NULL;
-           fclose(fp);
-           config_free();
-           return -1;
-       }
+    g_entries[g_entry_count].key = strdup(key);
+    g_entries[g_entry_count].value = strdup(value);
+    if (g_entries[g_entry_count].key == NULL ||
+        g_entries[g_entry_count].value == NULL) {
+        /* Free whichever strdup succeeded to avoid partial leak. */
+        free(g_entries[g_entry_count].key);
+        free(g_entries[g_entry_count].value);
+        g_entries[g_entry_count].key = NULL;
+        g_entries[g_entry_count].value = NULL;
+        fclose(fp);
+        config_free();
+        return -1;
+    }
 
-        g_entry_count++;
+    g_entry_count++;
     }
 
     fclose(fp);
@@ -176,7 +177,8 @@ int config_get_int(const char *key, int default_value)
 
     errno = 0;
     result = strtol(value, &endptr, 10);
-    if (errno != 0 || *endptr != '\0') {
+    if (errno != 0 || *endptr != '\0' ||
+        result < INT_MIN || result > INT_MAX) {
         return default_value;
     }
 
