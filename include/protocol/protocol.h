@@ -61,14 +61,6 @@ struct packet {
 };
 
 /**
- * @brief 初始化 CRC16 查找表。
- *
- * 使用 crc16_compute() 或 packet_checksum_verify() 前必须先调用一次；
- * 多次调用是安全的。
- */
-void crc16_init(void);
-
-/**
  * @brief 计算一段数据的 CRC16 值。
  *
  * 使用 CRC16-CCITT-FALSE（多项式 0x1021，初始值 0xFFFF）。

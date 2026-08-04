@@ -7,6 +7,33 @@
 
 #include "protocol/protocol.h"
 #include "utils/logger.h"
+#include "utils/ringbuffer.h"
+
+/* 解析器接受的最大 Payload 长度（防御超大帧）。 */
+#define PARSER_MAX_PAYLOAD_LEN PROTOCOL_MAX_PAYLOAD_LEN
+
+/* 最大编码帧大小：帧头(2) + 长度(2) + 命令字(1) + Payload + CRC(2)。 */
+#define PARSER_MAX_FRAME_SIZE  PROTOCOL_MAX_FRAME_SIZE
+
+/* 粘包/拆包解析的状态机状态。 */
+enum parser_state {
+    STATE_WAIT_HEAD,     /* 等待帧头 0xAA 0x55。 */
+    STATE_WAIT_LEN,      /* 等待 2 字节的 Payload 长度。 */
+    STATE_WAIT_PAYLOAD,  /* 等待命令字 + Payload。 */
+    STATE_WAIT_CRC,      /* 等待 2 字节的 CRC。 */
+    STATE_FRAME_COMPLETE /* 完整帧已组装完成。 */
+};
+
+/* 每个连接的协议解析上下文。 */
+struct parse_ctx {
+    int fd;                       /* 所属连接的文件描述符。 */
+    ringbuffer_t rb;              /* 该连接独立的 RingBuffer。 */
+    enum parser_state state;      /* 当前解析器状态。 */
+    uint16_t expected_len;        /* 从帧头解码出的 Payload 长度。 */
+    size_t recv_offset;           /* temp_buf 中已积累的字节数。 */
+    uint8_t temp_buf[PARSER_MAX_FRAME_SIZE]; /* 帧组装缓冲区。 */
+    struct parse_ctx *next;       /* 链表指针（内部使用）。 */
+};
 
 /*
  * 状态迁移图：
@@ -140,15 +167,6 @@ void packet_parser_unregister(int fd)
         }
         pp = &cur->next;
     }
-}
-
-struct parse_ctx *packet_parser_get_ctx(int fd)
-{
-    if (fd < 0) {
-        return NULL;
-    }
-
-    return parser_find(fd);
 }
 
 /**

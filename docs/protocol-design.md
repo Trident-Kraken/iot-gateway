@@ -45,7 +45,7 @@
 - 覆盖范围：`[长度(2B) + 命令字(1B) + Payload(NB)]`，**不含帧头**。
 - 校验值以大端写入帧尾。
 - 已知向量：`crc16("123456789") == 0x29B1`（CTest 用例 `crc16_known_vector` 持续守护该防线）。
-- 实现：`protocol.c` 用查表法（`crc16_init()` 建表，`crc16_compute()` 计算）；Python 侧
+- 实现：`protocol.c` 用查表法（`crc16_compute()` 首次调用时惰性建表）；Python 侧
   `tests/integration/device_simulator.py` / `stress_test.py` 内各有一份等价实现，压测/模拟器与网关必须严格一致。
 
 ## 4. 粘包/拆包状态机

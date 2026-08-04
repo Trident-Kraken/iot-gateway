@@ -5,7 +5,6 @@
 #include <stdint.h>
 
 #include "protocol/protocol.h"
-#include "utils/ringbuffer.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -20,33 +19,16 @@ extern "C" {
  * 可以为每个客户端独立进行粘包拆包解析。
  */
 
-/* 解析器接受的最大Payload 长度（防御超大帧）。*/
-#define PARSER_MAX_PAYLOAD_LEN PROTOCOL_MAX_PAYLOAD_LEN
-
-/* 最大编码帧大小：帧头2) + 长度(2) + 命令字1) + Payload + CRC(2)。*/
-#define PARSER_MAX_FRAME_SIZE  PROTOCOL_MAX_FRAME_SIZE
-
-/* 粘包/拆包解析的状态机状态。*/
-enum parser_state {
-    STATE_WAIT_HEAD,     /* 等待帧头 0xAA 0x55。*/
-    STATE_WAIT_LEN,      /* 等待 2 字节的Payload 长度。*/
-    STATE_WAIT_PAYLOAD,  /* 等待命令字+ Payload。*/
-    STATE_WAIT_CRC,      /* 等待 2 字节的CRC。*/
-    STATE_FRAME_COMPLETE /* 完整帧已组装完成。*/
-};
+/*
+ * 状态机（enum parser_state）与 struct parse_ctx 的完整定义位于
+ * packet_parser.c（内部实现）。头文件只暴露不透明句柄，避免把 temp_buf
+ * 等内部缓冲布局泄露给调用方。
+ */
 
 /**
- * @brief 每个连接的协议解析上下文。
+ * @brief 每个连接的协议解析上下文（不透明句柄）。
  */
-struct parse_ctx {
-    int fd;                       /* 所属连接的文件描述符。*/
-    ringbuffer_t rb;              /* 该连接独立的 RingBuffer。*/
-    enum parser_state state;      /* 当前解析器状态。*/
-    uint16_t expected_len;        /* 从帧头解码出的Payload 长度。*/
-    size_t recv_offset;           /* temp_buf 中已积累的字节数。*/
-    uint8_t temp_buf[PARSER_MAX_FRAME_SIZE]; /* 帧组装缓冲区。*/
-    struct parse_ctx *next;       /* 链表指针（内部使用）。*/
-};
+struct parse_ctx;
 
 /**
  * @brief 当完整帧被解析时调用的回调函数。
@@ -77,14 +59,6 @@ int packet_parser_register(int fd, struct parse_ctx **ctx);
  * @param fd 连接文件描述符。
  */
 void packet_parser_unregister(int fd);
-
-/**
- * @brief 根据文件描述符查找解析器上下文。
- *
- * @param fd 连接文件描述符。
- * @return 指向上下文的指针，未找到时返回 NULL。
- */
-struct parse_ctx *packet_parser_get_ctx(int fd);
 
 /**
  * @brief 将新收到的原始字节送入解析器。

@@ -50,11 +50,6 @@ static void crc16_ensure_table(void)
     s_crc16_initialized = 1;
 }
 
-void crc16_init(void)
-{
-    crc16_ensure_table();
-}
-
 uint16_t crc16_compute(const uint8_t *data, size_t len)
 {
     uint16_t crc;
@@ -171,6 +166,12 @@ ssize_t packet_decode(const uint8_t *data, size_t len, struct packet **pkt)
     /* 提取 Payload 长度（大端 → 主机字节序）。 */
     memcpy(&net_len, &data[2], sizeof(net_len));
     payload_len = ntohs(net_len);
+
+    /* 防御超大 Payload：与 packet_parser 状态机的上限保持一致。 */
+    if (payload_len > PROTOCOL_MAX_PAYLOAD_LEN) {
+        errno = EBADMSG;
+        return -1;
+    }
 
     /* 计算总帧长并检查是否完整。 */
     total_len = PACKET_MIN_SIZE + payload_len;
