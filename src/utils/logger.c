@@ -33,7 +33,16 @@ int logger_init(const char *path, enum log_level level)
     } else {
         g_log_fp = fopen(path, "a");
         if (g_log_fp == NULL) {
-            return -1;
+            /* 目录缺失或不可写：降级 stderr，避免网关无法启动。 */
+            fprintf(stderr,
+                    "logger_init: cannot open %s (%s), "
+                    "falling back to stderr\n",
+                    path, strerror(errno));
+            g_log_fp = stderr;
+            g_log_path = NULL;
+            g_log_size = 0;
+            g_log_level = level;
+            return 0;
         }
 
         if (fseek(g_log_fp, 0, SEEK_END) == 0) {
