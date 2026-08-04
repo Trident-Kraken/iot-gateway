@@ -11,3 +11,13 @@ add_executable(unit_tests
 target_include_directories(unit_tests PRIVATE ${CMAKE_SOURCE_DIR}/include)
 
 add_test(NAME unit_tests COMMAND unit_tests)
+
+# config_parser 单元测试。
+add_executable(test_config
+    test_config.c
+    ${CMAKE_SOURCE_DIR}/src/utils/config_parser.c
+)
+
+target_include_directories(test_config PRIVATE ${CMAKE_SOURCE_DIR}/include)
+
+add_test(NAME unit_config COMMAND test_config)
