@@ -43,3 +43,13 @@ target_include_directories(test_threadpool PRIVATE ${CMAKE_SOURCE_DIR}/include)
 target_link_libraries(test_threadpool PRIVATE Threads::Threads)
 
 add_test(NAME unit_threadpool COMMAND test_threadpool)
+
+# fd_util 单元测试（非阻塞设置）。
+add_executable(test_fd_util
+    test_fd_util.c
+    ${CMAKE_SOURCE_DIR}/src/utils/fd_util.c
+)
+
+target_include_directories(test_fd_util PRIVATE ${CMAKE_SOURCE_DIR}/include)
+
+add_test(NAME unit_fd_util COMMAND test_fd_util)
