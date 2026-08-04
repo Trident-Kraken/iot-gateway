@@ -23,3 +23,11 @@ add_test(
     COMMAND ${Python3_EXECUTABLE} -c
             "import sys; sys.path.insert(0, '${CMAKE_CURRENT_SOURCE_DIR}'); from stress_test import crc16; assert crc16(b'123456789') == 0x29B1, hex(crc16(b'123456789'))"
 )
+
+# E2E 冒烟：mosquitto + 网关 + 模拟器 + MQTT 断言 + 0x03 下行。
+# 依赖缺失/环境限制时脚本返回 77，CTest 标记为 SKIP（不算失败）。
+add_test(
+    NAME integration_e2e
+    COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/run_e2e.sh
+)
+set_tests_properties(integration_e2e PROPERTIES TIMEOUT 120 SKIP_RETURN_CODE 77)
