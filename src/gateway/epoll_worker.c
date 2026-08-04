@@ -31,14 +31,21 @@ static struct connection *g_conn_list = NULL;
  * @brief 存储在 epoll_event.data.ptr 中的每连接上下文。
  *
  * packet_parser 内部拥有每连接 RingBuffer，因此 epoll_worker 只需
- * 跟踪 fd 以及该上下文是否属于监听 socket。
+ * 跟踪 fd 及其在事件循环中的角色（监听/客户端/self-pipe）。
  */
+/* 连接角色：区分 epoll 事件循环中三类 fd 来源。 */
+enum conn_role {
+    CONN_ROLE_CLIENT = 0, /* 客户端连接。 */
+    CONN_ROLE_LISTEN = 1, /* 监听 socket。 */
+    CONN_ROLE_PIPE   = 2  /* close-request self-pipe（sentinel）。 */
+};
+
 struct connection {
     int       fd;
     uint64_t  generation; /* 连接代际号：accept 时递增分配，fd 复用后用于区分。 */
-    int       is_listen;  /* 1 = listen socket, 0 = client, 2 = close-pipe sentinel */
+    enum conn_role role;  /* 该 fd 在事件循环中的角色。 */
     struct connection *next; /* singly-linked list of client connections */
-}; /* 1 表示监听 socket，0 表示客户端socket。*/
+};
 
 /* 连接代际计数器（仅 epoll 线程访问，无需加锁）。 */
 static uint64_t g_generation = 0;
@@ -317,14 +324,16 @@ static void connection_close(int epoll_fd, struct connection *conn)
 
     if (epoll_ctl(epoll_fd, EPOLL_CTL_DEL, conn->fd, NULL) == -1) {
         /*
-         * 忽略 EBADF：如果对端重置了连接，该 fd 可能已被内核关闭。         * 记录其他错误以用于诊断。         */
+         * 忽略 EBADF：如果对端重置了连接，该 fd 可能已被内核关闭。
+         * 记录其他错误以用于诊断。
+         */
         if (errno != EBADF) {
             LOG_ERROR("connection_close: epoll_ctl DEL fd=%d failed: %s",
                       conn->fd, strerror(errno));
         }
     }
 
-    if (!conn->is_listen) {
+    if (conn->role != CONN_ROLE_LISTEN) {
         /* 释放解析器上下文及其每连接RingBuffer。*/
         packet_parser_unregister(conn->fd);
         /* 从连接管理器移除（心跳检测）。*/
@@ -394,7 +403,7 @@ static void handle_listen(int epoll_fd, int listen_fd)
 
         conn->fd = client_fd;
         conn->generation = gen;
-        conn->is_listen = 0;
+        conn->role = CONN_ROLE_CLIENT;
         conn_list_add(conn);
 
         /*
@@ -563,7 +572,7 @@ int epoll_worker_run(int listen_fd)
     }
 
     listen_conn->fd = listen_fd;
-    listen_conn->is_listen = 1;
+    listen_conn->role = CONN_ROLE_LISTEN;
 
     if (epoll_add(epoll_fd, listen_fd, listen_conn) == -1) {
         free(listen_conn);
@@ -578,7 +587,7 @@ int epoll_worker_run(int listen_fd)
             LOG_ERROR("epoll_worker_run: calloc pipe_conn failed");
         } else {
             pipe_conn->fd = g_close_pipe[0];
-            pipe_conn->is_listen = 2; /* sentinel for close pipe */
+            pipe_conn->role = CONN_ROLE_PIPE;
             if (epoll_add(epoll_fd, g_close_pipe[0], pipe_conn) == -1) {
                 free(pipe_conn);
                 pipe_conn = NULL;
@@ -612,18 +621,18 @@ int epoll_worker_run(int listen_fd)
 
             ev = events[i].events;
 
-            /* 错误/挂起事件也意味着应该关闭连接。*/
+            /* 错误/挂起事件也意味着应该关闭连接（仅客户端连接）。 */
             if (ev & (EPOLLERR | EPOLLHUP)) {
-                if (!conn->is_listen) {
+                if (conn->role == CONN_ROLE_CLIENT) {
                     connection_close(epoll_fd, conn);
                 }
                 continue;
             }
 
             if (ev & EPOLLIN) {
-                if (conn->is_listen == 1) {
+                if (conn->role == CONN_ROLE_LISTEN) {
                     handle_listen(epoll_fd, conn->fd);
-                } else if (conn->is_listen == 2) {
+                } else if (conn->role == CONN_ROLE_PIPE) {
                     handle_pipe_messages(epoll_fd);
                 } else {
                     handle_client(epoll_fd, conn);
