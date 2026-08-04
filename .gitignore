@@ -37,3 +37,6 @@ Testing/
 .agents/
 .specify/
 .codex/
+
+# ---- 压测生成报告 ----
+tests/stress_report.txt

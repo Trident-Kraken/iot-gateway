@@ -3,6 +3,16 @@
 本项目所有值得记录的变更。格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [Unreleased]
+
+### 修复（Day2 代码审查）
+
+- `fix(protocol)`: RingBuffer 满则拒绝写入，修复解析器背压检查形同虚设导致的静默丢帧（AGENTS §5.3）。
+- `fix(network)`: 连接代际号（generation）双重匹配，修复心跳超时关闭时 fd 复用误关新连接的竞态。
+- `fix(mqtt)`: 新增 MQTT 管理线程驱动 `mosquitto_loop()`，修复长连接无 PINGREQ/keepalive 与发布依赖阻塞 socket 写的问题；publish 改为锁外 QoS0 入队快速返回。
+- `fix(config)`: 校验 server_port / thread_pool_size / mqtt_port 范围，非法配置拒绝启动（原静默截断 + 日志误导）。
+- `fix(logger)`: 日志目录缺失时降级 stderr，网关不再因 `logs/` 不存在而启动失败。
+
 ## [0.1.0] - 2026-08-04
 
 ### 新增
