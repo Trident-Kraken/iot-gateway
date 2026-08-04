@@ -23,23 +23,7 @@ jobs:
       - name: Build
         run: cmake --build build
 
-      - name: CTest self-checks
+      - name: CTest (unit + integration)
+        # 单测 7 项 + 集成 5 项（E2E/连接生命周期/MQTT 离线缓存/
+        # 配置校验/故障注入）；依赖缺失或环境受限时用例返回 77 被跳过。
         run: ctest --test-dir build --output-on-failure
-
-      - name: Integration smoke (gateway + mosquitto)
-        run: |
-          set -e
-          mkdir -p logs
-          mosquitto -d
-          ./build/src/iot-gateway &
-          GW_PID=$!
-          trap 'kill $GW_PID 2>/dev/null || true; pkill -x mosquitto 2>/dev/null || true' EXIT
-          sleep 2
-          # 先订阅再产生流量（QoS0 消息不重放，订阅者须先行）
-          timeout 20 mosquitto_sub -t 'sensor/data' -C 1 -h localhost -p 1883 >/tmp/mqtt_msg.txt &
-          SUB_PID=$!
-          python3 tests/integration/device_simulator.py --devices 1 --freq 2 --duration 2 --stats
-          wait $SUB_PID
-          test -s /tmp/mqtt_msg.txt
-          # CMD_CONFIG（0x03）请求/响应式下行验证
-          python3 tests/integration/config_downlink_test.py 127.0.0.1 8080

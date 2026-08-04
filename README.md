@@ -75,6 +75,30 @@ python3 tests/integration/stress_test.py -c 100 -f 10 -d 60 -r /tmp/stress_large
 
 完整压测报告见 [docs/test-report.md](docs/test-report.md)。
 
+## 测试
+
+```bash
+# 1. 单元测试 + 集成测试（集成用例依赖 mosquitto，环境受限时自动跳过）
+ctest --test-dir build --output-on-failure
+
+# 2. 集成用例单独运行（等价于 ctest 中的 integration_* 用例）
+bash tests/integration/run_e2e.sh                      # E2E 全链路
+python3 tests/integration/test_connection_lifecycle.py # 心跳超时/断连清理
+python3 tests/integration/test_mqtt_offline_cache.py   # MQTT 离线缓存恢复
+python3 tests/integration/test_config_validation.py    # 非法配置 fail-fast
+python3 tests/integration/test_fault_injection.py      # 异常帧/超大长度注入
+
+# 3. 压测与长时间运行（可选）
+python3 tests/integration/stress_test.py -c 100 -f 10 -d 60 -r /tmp/stress.txt
+bash tests/scripts/run_soak.sh 30                      # 30 分钟 RSS 稳定性
+
+# 4. 内存检查
+valgrind --leak-check=full --error-exitcode=99 ./build/tests/unit/unit_tests
+```
+
+> 退出码约定：集成脚本 `0` 通过、`1` 失败、`77` 环境不满足（CTest 标记为 Skipped，不误报失败）。
+> 完整结果见 [docs/test-report.md](docs/test-report.md)。
+
 ## 项目结构
 
 ```
