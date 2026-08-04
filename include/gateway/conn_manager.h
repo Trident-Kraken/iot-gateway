@@ -3,6 +3,7 @@
 
 #include <pthread.h>
 #include <stddef.h>
+#include <stdint.h>
 #include <time.h>
 
 #ifdef __cplusplus
@@ -17,6 +18,7 @@ extern "C" {
  */
 struct conn_entry {
     int        fd;            /* 客户端 socket 文件描述符。 */
+    uint64_t   generation;    /* 连接代际号：fd 复用后用于区分新旧连接。 */
     time_t     last_active;   /* 最近一次 recv() 活动的时间戳。 */
     struct conn_entry *next;  /* 链表指针。 */
 };
@@ -38,11 +40,12 @@ void conn_manager_destroy(void);
 /**
  * @brief 添加一个新的连接条目。
  *
- * @param fd 客户端文件描述符。
+ * @param fd         客户端文件描述符。
+ * @param generation 连接代际号（epoll_worker 分配，用于 fd 复用场景）。
  *
  * @return 成功返回 0，失败返回 -1。
  */
-int conn_manager_add(int fd);
+int conn_manager_add(int fd, uint64_t generation);
 
 /**
  * @brief 按文件描述符删除一个连接条目。

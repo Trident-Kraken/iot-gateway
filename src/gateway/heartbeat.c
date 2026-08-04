@@ -3,6 +3,7 @@
 #include <errno.h>
 #include <pthread.h>
 #include <stdatomic.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -16,9 +17,15 @@
 /* 单次扫描中关闭的最大过期连接数。*/
 #define HEARTBEAT_BATCH_SIZE 256
 
+/* 单个待关闭连接：fd + 代际号，避免 fd 复用后误关新连接。 */
+struct stale_entry {
+    int      fd;
+    uint64_t generation;
+};
+
 /* 传递给 conn_manager_foreach() 的收集关闭上下文。*/
 struct stale_collect_ctx {
-    int   fds[HEARTBEAT_BATCH_SIZE];
+    struct stale_entry entries[HEARTBEAT_BATCH_SIZE];
     size_t count;
     time_t now;
     int    timeout_sec;
@@ -48,7 +55,9 @@ static void collect_stale(struct conn_entry *entry, void *arg)
     }
 
     if (ctx->now - entry->last_active > (time_t)ctx->timeout_sec) {
-        ctx->fds[ctx->count++] = entry->fd;
+        ctx->entries[ctx->count].fd = entry->fd;
+        ctx->entries[ctx->count].generation = entry->generation;
+        ctx->count++;
     }
 }
 
@@ -78,17 +87,19 @@ static void *heartbeat_thread(void *arg)
         conn_manager_foreach(collect_stale, &ctx);
 
         for (i = 0; i < ctx.count; i++) {
-            int fd = ctx.fds[i];
+            struct stale_entry *se = &ctx.entries[i];
 
-            LOG_INFO("heartbeat: closing inactive fd=%d (timeout %ds)",
-                     fd, g_timeout_sec);
+            LOG_INFO("heartbeat: closing inactive fd=%d (gen=%llu, timeout %ds)",
+                     se->fd, (unsigned long long)se->generation,
+                     g_timeout_sec);
 
             /*
-             * 关闭 socket。这也会将其从内核的 epoll 集中移除。             * conn_manager 条目被移除后，epoll 工作线程将不会再次             * 报告它。             */
-            /* Delegate to the epoll thread via self-pipe: it will perform
+             * Delegate to the epoll thread via self-pipe: it will perform
              * full cleanup (parser unregister, conn_manager remove,
-             * connection struct free, close) without racing with I/O. */
-            epoll_worker_request_close(fd);
+             * connection struct free, close) without racing with I/O.
+             * generation 由 epoll 线程双重匹配，fd 复用后不会误关新连接。
+             */
+            epoll_worker_request_close(se->fd, se->generation);
         }
     }
 

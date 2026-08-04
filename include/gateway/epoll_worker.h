@@ -1,6 +1,8 @@
 #ifndef IOT_GATEWAY_EPOLL_WORKER_H
 #define IOT_GATEWAY_EPOLL_WORKER_H
 
+#include <stdint.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -32,15 +34,19 @@ int epoll_worker_init(void);
 void epoll_worker_destroy(void);
 
 /**
- * @brief Request the epoll thread to close a connection by fd.
+ * @brief Request the epoll thread to close a connection.
  *
- * Thread-safe. Writes the fd into a self-pipe; the epoll thread reads
- * it and performs full cleanup (epoll_ctl DEL, parser unregister,
+ * Thread-safe. Writes {fd, generation} into a self-pipe; the epoll thread
+ * reads it and performs full cleanup (epoll_ctl DEL, parser unregister,
  * conn_manager remove, close, free) via connection_close().
  *
- * @param fd The stale client fd to close.
+ * generation 用于避免 fd 复用竞态：若旧连接已被清理且 fd 被新连接复用，
+ * epoll 线程按 fd+generation 双重匹配，不会误关新连接。
+ *
+ * @param fd         The stale client fd to close.
+ * @param generation The connection generation captured at collect time.
  */
-void epoll_worker_request_close(int fd);
+void epoll_worker_request_close(int fd, uint64_t generation);
 
 int epoll_worker_run(int listen_fd);
 

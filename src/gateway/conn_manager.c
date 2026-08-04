@@ -49,7 +49,7 @@ void conn_manager_destroy(void)
     g_initialized = 0;
 }
 
-int conn_manager_add(int fd)
+int conn_manager_add(int fd, uint64_t generation)
 {
     struct conn_entry *entry;
 
@@ -64,6 +64,7 @@ int conn_manager_add(int fd)
     }
 
    entry->fd = fd;
+   entry->generation = generation;
    entry->last_active = time(NULL);
 
    pthread_mutex_lock(&g_mutex);

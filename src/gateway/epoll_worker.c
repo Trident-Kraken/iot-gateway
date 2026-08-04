@@ -2,6 +2,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -30,10 +31,20 @@ static struct connection *g_conn_list = NULL;
  * packet_parser 内部拥有每连接RingBuffer，因此epoll_worker 只需
  * 跟踪 fd 以及该上下文是否属于监听 socket。 */
 struct connection {
-    int  fd;
-    int  is_listen; /* 1 = listen socket, 0 = client, 2 = close-pipe sentinel */
+    int       fd;
+    uint64_t  generation; /* 连接代际号：accept 时递增分配，fd 复用后用于区分。 */
+    int       is_listen;  /* 1 = listen socket, 0 = client, 2 = close-pipe sentinel */
     struct connection *next; /* singly-linked list of client connections */
 }; /* 1 表示监听 socket，0 表示客户端socket。*/
+
+/* 连接代际计数器（仅 epoll 线程访问，无需加锁）。 */
+static uint64_t g_generation = 0;
+
+/* self-pipe 载荷：fd + generation 双重匹配，防止 fd 复用后误关新连接。 */
+struct close_request {
+    int      fd;
+    uint64_t generation;
+};
 
 /**
  * @brief 将文件描述符设置为非阻塞模式。 *
@@ -77,11 +88,11 @@ static void conn_list_remove(struct connection *conn)
     }
 }
 
-static struct connection *conn_list_find(int fd)
+static struct connection *conn_list_find(int fd, uint64_t generation)
 {
     struct connection *conn;
     for (conn = g_conn_list; conn != NULL; conn = conn->next) {
-        if (conn->fd == fd) {
+        if (conn->fd == fd && conn->generation == generation) {
             return conn;
         }
     }
@@ -129,23 +140,28 @@ void epoll_worker_destroy(void)
     }
 }
 
-void epoll_worker_request_close(int fd)
+void epoll_worker_request_close(int fd, uint64_t generation)
 {
+    struct close_request req;
+
     if (g_close_pipe[1] < 0) {
         LOG_ERROR("epoll_worker_request_close: pipe not initialized, fd=%d", fd);
         return;
     }
 
     /*
-     * Write the fd into the self-pipe. The epoll thread will read it and
-     * perform full cleanup via connection_close(). If the pipe is full
+     * Write {fd, generation} into the self-pipe. The epoll thread will read it
+     * and perform full cleanup via connection_close(). If the pipe is full
      * (extremely unlikely with 64KB capacity), the connection stays open
      * and will be retried on the next heartbeat scan. We do NOT fall back
      * to a direct close() here, as that would race with the epoll thread
      * and leak the connection struct.
      */
-    ssize_t n = write(g_close_pipe[1], &fd, sizeof(fd));
-    if (n != sizeof(fd) && errno != EAGAIN) {
+    req.fd = fd;
+    req.generation = generation;
+
+    ssize_t n = write(g_close_pipe[1], &req, sizeof(req));
+    if (n != (ssize_t)sizeof(req) && errno != EAGAIN) {
         LOG_ERROR("epoll_worker_request_close: pipe write failed fd=%d: %s",
                   fd, strerror(errno));
     }
@@ -236,7 +252,10 @@ static void handle_listen(int epoll_fd, int listen_fd)
             continue;
         }
 
-        if (conn_manager_add(client_fd) != 0) {
+        /* 分配连接代际号：fd 复用后据此区分新旧连接。 */
+        uint64_t gen = ++g_generation;
+
+        if (conn_manager_add(client_fd, gen) != 0) {
             LOG_ERROR("handle_listen: conn_manager_add failed, closing fd=%d",
                       client_fd);
             packet_parser_unregister(client_fd);
@@ -255,6 +274,7 @@ static void handle_listen(int epoll_fd, int listen_fd)
         }
 
         conn->fd = client_fd;
+        conn->generation = gen;
         conn->is_listen = 0;
         conn_list_add(conn);
 
@@ -338,12 +358,12 @@ static void handle_client(int epoll_fd, struct connection *conn)
  */
 static void handle_close_requests(int epoll_fd)
 {
-    int fds[64];
+    struct close_request reqs[32];
     ssize_t n;
     size_t i;
 
     for (;;) {
-        n = read(g_close_pipe[0], fds, sizeof(fds));
+        n = read(g_close_pipe[0], reqs, sizeof(reqs));
         if (n <= 0) {
             if (n == -1 && errno == EINTR) {
                 continue;
@@ -351,15 +371,19 @@ static void handle_close_requests(int epoll_fd)
             break; /* EAGAIN or EOF */
         }
 
-        for (i = 0; i < (size_t)n / sizeof(int); i++) {
-            struct connection *conn = conn_list_find(fds[i]);
+        for (i = 0; i < (size_t)n / sizeof(struct close_request); i++) {
+            struct connection *conn =
+                conn_list_find(reqs[i].fd, reqs[i].generation);
             if (conn != NULL) {
-                LOG_INFO("epoll: closing fd=%d by heartbeat request",
-                         fds[i]);
+                LOG_INFO("epoll: closing fd=%d (gen=%llu) by heartbeat request",
+                         reqs[i].fd,
+                         (unsigned long long)reqs[i].generation);
                 connection_close(epoll_fd, conn);
             }
-            /* If conn is NULL, the connection was already closed by the
-             * epoll thread (e.g., peer sent FIN). No action needed. */
+            /* If conn is NULL, either the connection was already closed by
+             * the epoll thread (e.g., peer sent FIN), or the fd has been
+             * reused by a newer connection (generation mismatch). Either
+             * way, no action is needed — this is the fd-reuse guard. */
         }
     }
 }
