@@ -43,7 +43,7 @@ cmake --build build
 | `[server]` | `server_port` | 8080 | TCP 监听端口 |
 | `[thread_pool]` | `thread_pool_size` | 4 | 工作线程数（2~4 推荐） |
 | `[heartbeat]` | `heartbeat_interval` | 5 | 心跳扫描间隔（秒） |
-| `[heartbeat]` | `heartbeat_timeout` | 15 | 心跳超时断开（秒），3 次未收到即断开 |
+| `[heartbeat]` | `heartbeat_timeout` | 15 | 心跳超时断开（秒），超过阈值无任何数据则断开（任意收包均刷新活跃时间） |
 | `[log]` | `log_level` | INFO | 日志级别：DEBUG/INFO/ERROR |
 | `[mqtt]` | `mqtt_broker` | localhost | Broker 地址 |
 | `[mqtt]` | `mqtt_port` | 1883 | Broker 端口 |
@@ -82,7 +82,7 @@ mosquitto_sub -t 'sensor/data' -h localhost -p 1883
 |---|---|
 | 网关启动失败，端口占用 | 换 `server_port` 或 `ss -tlnp` 查占用进程 |
 | MQTT 上报无数据 | 确认 broker 已启动：`mosquitto -d`；`mosquitto_sub -t 'sensor/data'` 应能收到 |
-| 连接被周期性断开 | 心跳超时（默认 15s）：确认设备按协议发送 `CMD_HEARTBEAT` |
+| 连接被周期性断开 | 心跳超时（默认 15s）：确认设备持续上报数据或按协议发送 `CMD_HEARTBEAT`（任意收包都会刷新活跃时间） |
 | 日志无输出 | 检查 `logs/` 目录可写、`log_level` 配置 |
 
 ## 7. 压测
