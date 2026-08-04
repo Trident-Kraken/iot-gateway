@@ -31,28 +31,26 @@ int mqtt_client_init(const char *broker, int port, const char *client_id);
  *   3. Broker 压力小 — QoS 0 消息不持久化（除非 Broker 配置 bridge），内存
  *      占用低，适合大规模部署。
  *
- * 线程安全：内部持锁保护 mosquitto 句柄，多个工作线程可并发调用。
- * 发布失败时自动重连（最多 3 次），全部失败后丢弃消息，不影响网关继续运行。
+ * 线程安全：mosquitto_threaded_set(true) 开启 libmosquitto 线程安全模式，
+ * 多个工作线程可并发调用；MQTT 管理线程驱动 mosquitto_loop() 负责实际网络
+ * 发送与 PINGREQ/keepalive。
+ *
+ * 发布为 QoS0 fire-and-forget：仅入队即返回，失败时 fast-fail 丢弃消息并
+ * 由管理线程自动重连，不影响网关继续运行。
  *
  * @param topic   MQTT Topic，如 "sensor/data"。
  * @param payload 消息体（C 字符串，JSON 格式）。
  *
- * @return 0 成功（消息已提交到 Broker），-1 失败（3 次重连后仍未成功）。
+ * @return 0 成功（消息已提交给 libmosquitto），-1 失败（未连接/发布失败）。
 */
-/*
- * Updated behavior (v1.4): publish is non-blocking. If the broker is
- * unreachable, the message is dropped immediately (fast-fail) and an
- * async reconnect thread is signalled. The thread retries connection
- * in the background; worker threads are never blocked on reconnect.
- */
 int mqtt_publish(const char *topic, const char *payload);
 
 /**
  * @brief 断开 MQTT 连接并释放所有资源。
  *
- * 先停止异步重连线程，再发送 DISCONNECT 报文（优雅断开），销毁
- * mosquitto 实例，最后清理 libmosquitto 全局状态。应在所有工作线程
- * 停止后调用。
+ * 先停止 MQTT 管理线程（join），再发送 DISCONNECT 报文（优雅断开），
+ * 销毁 mosquitto 实例，最后清理 libmosquitto 全局状态。应在所有工作
+ * 线程停止后调用。
  */
 void mqtt_client_destroy(void);
 
