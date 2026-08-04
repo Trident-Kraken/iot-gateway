@@ -91,7 +91,7 @@ iot-gateway/
 ├── src/                        # 实现文件，与 include/ 分组镜像
 │   ├── gateway/  protocol/  business/  utils/
 ├── tests/
-│   ├── unit/                   # C 单元测试占位（当前按约定不做 C 单测）
+│   ├── unit/                   # C 单元测试（协议/环形缓冲/状态机）
 │   └── integration/            # Python 设备模拟器 + 压测脚本 + CTest 自检用例
 ├── tools/                      # 运维/调试辅助脚本占位
 ├── docs/                       # 架构、协议设计、部署、压测报告、Wireshark 指南等
