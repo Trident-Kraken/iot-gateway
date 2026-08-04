@@ -7,12 +7,20 @@
 #include <time.h>
 
 #include "gateway/conn_manager.h"
+#include "gateway/epoll_worker.h"
 #include "utils/logger.h"
 #include "business/mqtt_client.h"
 #include "protocol/protocol.h"
 
 /* MQTT 上报 Topic。 */
 #define MQTT_TOPIC_SENSOR   "sensor/data"
+
+/*
+ * CMD_CONFIG 下行响应的默认设备配置（JSON）。
+ * 当前网关没有设备配置数据源，先以固定默认值回复；后续可扩展为
+ * 按 device_id 查询真实配置后下发。
+ */
+#define DEVICE_CONFIG_JSON  "{\"sampling_interval\":5,\"upload_freq\":2,\"heartbeat_interval\":5}"
 
 /* 简易 JSON 提取缓冲区大小。 */
 #define JSON_KEY_MAX   32
@@ -134,8 +142,10 @@ static int json_extract(const char *json, size_t json_len,
  *   - 当前不引入 cJSON 等第三方库，以 strstr + sscanf 完成简易解析。
  *   - Payload 中可能不含 '\0'，需手动构造临时副本保证字符串安全。
  */
-void handle_sensor_data(int fd, const uint8_t *payload, size_t len)
+void handle_sensor_data(int fd, uint64_t generation,
+                         const uint8_t *payload, size_t len)
 {
+    (void)generation;
     char *json_str;
     char device_id[JSON_VALUE_MAX]   = "unknown";
     char temp_str[JSON_VALUE_MAX]    = "0.0";
@@ -217,8 +227,10 @@ void handle_sensor_data(int fd, const uint8_t *payload, size_t len)
  *   这里安全地访问 conn_manager（conn_manager_update_active_time 内部自
  *   行加锁）。
  */
-void handle_heartbeat(int fd, const uint8_t *payload, size_t len)
+void handle_heartbeat(int fd, uint64_t generation,
+                      const uint8_t *payload, size_t len)
 {
+    (void)generation;
     (void)payload;
     (void)len;
 
@@ -230,6 +242,63 @@ void handle_heartbeat(int fd, const uint8_t *payload, size_t len)
     conn_manager_update_active_time(fd);
 
     LOG_DEBUG("handle_heartbeat: fd=%d activity refreshed", fd);
+}
+
+/**
+ * @brief 处理 CMD_CONFIG (0x03) —— 配置请求 / 下行响应。
+ *
+ * 设备发送配置请求帧（Payload 可为空或 JSON），网关回发一帧 CMD_CONFIG：
+ *   - 用 packet_encode() 将默认设备配置 JSON 编码为完整帧；
+ *   - 通过 epoll_worker_request_send() 委托 epoll 线程发送（best-effort）；
+ *   - fd + generation 双重匹配，连接已关闭或 fd 被复用时静默丢弃。
+ *
+ * 面试点注释（业务下行链路）：
+ *   工作线程不直接写客户端 fd —— 所有 fd I/O 收敛在 epoll 线程，工作线程
+ *   只通过 self-pipe 委托，避免多线程并发读写同一 socket 与 fd 复用竞态。
+ */
+void handle_config(int fd, uint64_t generation,
+                   const uint8_t *payload, size_t len)
+{
+    const size_t config_len = sizeof(DEVICE_CONFIG_JSON) - 1;
+    struct packet *pkt;
+    uint8_t frame[PROTOCOL_MAX_FRAME_SIZE];
+    size_t frame_len;
+
+    if (payload != NULL && len > 0) {
+        LOG_INFO("handle_config: fd=%d gen=%llu config request (%zu bytes)",
+                 fd, (unsigned long long)generation, len);
+    } else {
+        LOG_INFO("handle_config: fd=%d gen=%llu config request (empty)",
+                 fd, (unsigned long long)generation);
+    }
+
+    /* 组装 CMD_CONFIG 响应帧（柔性数组包）。 */
+    pkt = malloc(sizeof(*pkt) + config_len);
+    if (pkt == NULL) {
+        LOG_ERROR("handle_config: malloc failed for fd=%d", fd);
+        return;
+    }
+    pkt->cmd = CMD_CONFIG;
+    pkt->payload_len = (uint16_t)config_len;
+    memcpy(pkt->payload, DEVICE_CONFIG_JSON, config_len);
+
+    if (packet_encode(pkt, frame, sizeof(frame)) != 0) {
+        LOG_ERROR("handle_config: packet_encode failed for fd=%d", fd);
+        free(pkt);
+        return;
+    }
+    free(pkt);
+
+    frame_len = PACKET_MIN_SIZE + config_len;
+
+    /* 委托 epoll 线程发送（非阻塞、MSG_NOSIGNAL、generation 匹配）。 */
+    if (epoll_worker_request_send(fd, generation, frame, frame_len) != 0) {
+        LOG_ERROR("handle_config: enqueue downlink failed for fd=%d", fd);
+        return;
+    }
+
+    LOG_INFO("handle_config: fd=%d config downlink queued (%zu bytes)",
+             fd, frame_len);
 }
 
 /* =========================================================================
@@ -259,8 +328,9 @@ void cmd_handlers_init(void)
     /* 注册已知命令处理器。 */
     g_cmd_handlers[CMD_SENSOR_DATA] = handle_sensor_data; /* 0x01 */
     g_cmd_handlers[CMD_HEARTBEAT]   = handle_heartbeat;   /* 0x02 */
+    g_cmd_handlers[CMD_CONFIG]      = handle_config;      /* 0x03 下行 */
 
-    LOG_INFO("cmd_handlers: dispatch table initialized (2/256 handlers registered)");
+    LOG_INFO("cmd_handlers: dispatch table initialized (3/256 handlers registered)");
 }
 
 /* =========================================================================
@@ -336,5 +406,5 @@ void worker_process_task(struct task *task)
      *   - 调用 conn_manager_update_active_time()（内部自行加锁）。
      *   - 进行 CPU 密集的 JSON 解析。
      */
-    handler(task->fd, payload, payload_len);
+    handler(task->fd, task->generation, payload, payload_len);
 }

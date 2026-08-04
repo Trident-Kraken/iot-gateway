@@ -40,10 +40,23 @@ struct connection {
 /* 连接代际计数器（仅 epoll 线程访问，无需加锁）。 */
 static uint64_t g_generation = 0;
 
-/* self-pipe 载荷：fd + generation 双重匹配，防止 fd 复用后误关新连接。 */
-struct close_request {
+/* self-pipe 消息类型。 */
+enum {
+    PIPE_MSG_CLOSE = 1, /* 关闭连接（心跳线程委托）。 */
+    PIPE_MSG_SEND  = 2  /* 下行发送（工作线程委托，如 CMD_CONFIG 响应）。 */
+};
+
+/*
+ * self-pipe 载荷：fd + generation 双重匹配，防止 fd 复用后误关/误发新连接。
+ * data 内嵌完整编码帧（<= PROTOCOL_MAX_FRAME_SIZE），整条消息 < PIPE_BUF，
+ * write 原子且不会半写。
+ */
+struct pipe_msg {
     int      fd;
     uint64_t generation;
+    uint8_t  type;    /* PIPE_MSG_CLOSE / PIPE_MSG_SEND。 */
+    uint16_t len;     /* PIPE_MSG_SEND 时 data 有效长度。 */
+    uint8_t  data[PROTOCOL_MAX_FRAME_SIZE];
 };
 
 /**
@@ -142,7 +155,7 @@ void epoll_worker_destroy(void)
 
 void epoll_worker_request_close(int fd, uint64_t generation)
 {
-    struct close_request req;
+    struct pipe_msg msg;
 
     if (g_close_pipe[1] < 0) {
         LOG_ERROR("epoll_worker_request_close: pipe not initialized, fd=%d", fd);
@@ -150,21 +163,57 @@ void epoll_worker_request_close(int fd, uint64_t generation)
     }
 
     /*
-     * Write {fd, generation} into the self-pipe. The epoll thread will read it
+     * Write a CLOSE message into the self-pipe. The epoll thread will read it
      * and perform full cleanup via connection_close(). If the pipe is full
      * (extremely unlikely with 64KB capacity), the connection stays open
      * and will be retried on the next heartbeat scan. We do NOT fall back
      * to a direct close() here, as that would race with the epoll thread
      * and leak the connection struct.
      */
-    req.fd = fd;
-    req.generation = generation;
+    memset(&msg, 0, sizeof(msg)); /* data[] 清零，避免向 pipe 写入未初始化字节。 */
+    msg.type = PIPE_MSG_CLOSE;
+    msg.fd = fd;
+    msg.generation = generation;
+    msg.len = 0;
 
-    ssize_t n = write(g_close_pipe[1], &req, sizeof(req));
-    if (n != (ssize_t)sizeof(req) && errno != EAGAIN) {
+    ssize_t n = write(g_close_pipe[1], &msg, sizeof(msg));
+    if (n != (ssize_t)sizeof(msg) && errno != EAGAIN) {
         LOG_ERROR("epoll_worker_request_close: pipe write failed fd=%d: %s",
                   fd, strerror(errno));
     }
+}
+
+int epoll_worker_request_send(int fd, uint64_t generation,
+                              const uint8_t *frame, size_t len)
+{
+    struct pipe_msg msg;
+
+    if (g_close_pipe[1] < 0) {
+        LOG_ERROR("epoll_worker_request_send: pipe not initialized, fd=%d", fd);
+        return -1;
+    }
+
+    if (frame == NULL || len == 0 || len > PROTOCOL_MAX_FRAME_SIZE) {
+        LOG_ERROR("epoll_worker_request_send: invalid frame fd=%d len=%zu",
+                  fd, len);
+        errno = EINVAL;
+        return -1;
+    }
+
+    memset(&msg, 0, sizeof(msg)); /* data[] 清零，避免向 pipe 写入未初始化字节。 */
+    msg.type = PIPE_MSG_SEND;
+    msg.fd = fd;
+    msg.generation = generation;
+    msg.len = (uint16_t)len;
+    memcpy(msg.data, frame, len);
+
+    ssize_t n = write(g_close_pipe[1], &msg, sizeof(msg));
+    if (n != (ssize_t)sizeof(msg)) {
+        LOG_ERROR("epoll_worker_request_send: pipe write failed fd=%d: %s",
+                  fd, strerror(errno));
+        return -1;
+    }
+    return 0;
 }
 
 
@@ -351,19 +400,24 @@ static void handle_client(int epoll_fd, struct connection *conn)
     }
 }
 /*
- * Read fds from the close-request self-pipe and close the corresponding
- * connections. Called from the epoll event loop when the pipe is readable.
+ * Read messages from the self-pipe and act on them. Called from the epoll
+ * event loop when the pipe is readable.
  *
- * ET mode: loop read() until EAGAIN to drain all pending close requests.
+ * 消息类型：
+ *   - PIPE_MSG_CLOSE：心跳线程委托的关闭请求 → connection_close()。
+ *   - PIPE_MSG_SEND：工作线程委托的下行发送（如 CMD_CONFIG 响应）→ send()。
+ * 两者都携带 fd + generation 双重匹配，fd 复用后不会误关/误发新连接。
+ *
+ * ET mode: loop read() until EAGAIN to drain all pending messages.
  */
-static void handle_close_requests(int epoll_fd)
+static void handle_pipe_messages(int epoll_fd)
 {
-    struct close_request reqs[32];
+    struct pipe_msg msgs[32];
     ssize_t n;
     size_t i;
 
     for (;;) {
-        n = read(g_close_pipe[0], reqs, sizeof(reqs));
+        n = read(g_close_pipe[0], msgs, sizeof(msgs));
         if (n <= 0) {
             if (n == -1 && errno == EINTR) {
                 continue;
@@ -371,19 +425,35 @@ static void handle_close_requests(int epoll_fd)
             break; /* EAGAIN or EOF */
         }
 
-        for (i = 0; i < (size_t)n / sizeof(struct close_request); i++) {
+        for (i = 0; i < (size_t)n / sizeof(struct pipe_msg); i++) {
+            struct pipe_msg *msg = &msgs[i];
             struct connection *conn =
-                conn_list_find(reqs[i].fd, reqs[i].generation);
-            if (conn != NULL) {
-                LOG_INFO("epoll: closing fd=%d (gen=%llu) by heartbeat request",
-                         reqs[i].fd,
-                         (unsigned long long)reqs[i].generation);
-                connection_close(epoll_fd, conn);
+                conn_list_find(msg->fd, msg->generation);
+
+            if (conn == NULL) {
+                /* 连接已关闭或 fd 被新连接复用（generation 不匹配）：
+                 * 忽略过期请求，这是 fd 复用防护。 */
+                continue;
             }
-            /* If conn is NULL, either the connection was already closed by
-             * the epoll thread (e.g., peer sent FIN), or the fd has been
-             * reused by a newer connection (generation mismatch). Either
-             * way, no action is needed — this is the fd-reuse guard. */
+
+            if (msg->type == PIPE_MSG_CLOSE) {
+                LOG_INFO("epoll: closing fd=%d (gen=%llu) by heartbeat request",
+                         msg->fd,
+                         (unsigned long long)msg->generation);
+                connection_close(epoll_fd, conn);
+            } else if (msg->type == PIPE_MSG_SEND) {
+                /* 下行发送：best-effort。socket 非阻塞，缓冲区满（EAGAIN）
+                 * 或连接已断开时直接丢弃并记日志，配置响应可重发。 */
+                ssize_t sent = send(conn->fd, msg->data, msg->len,
+                                    MSG_NOSIGNAL);
+                if (sent != (ssize_t)msg->len) {
+                    LOG_ERROR("epoll: send downlink fd=%d failed: %s",
+                              msg->fd, strerror(errno));
+                } else {
+                    LOG_INFO("epoll: sent downlink frame to fd=%d (%u bytes)",
+                             msg->fd, (unsigned int)msg->len);
+                }
+            }
         }
     }
 }
@@ -478,7 +548,7 @@ int epoll_worker_run(int listen_fd)
                 if (conn->is_listen == 1) {
                     handle_listen(epoll_fd, conn->fd);
                 } else if (conn->is_listen == 2) {
-                    handle_close_requests(epoll_fd);
+                    handle_pipe_messages(epoll_fd);
                 } else {
                     handle_client(epoll_fd, conn);
                 }

@@ -1,6 +1,7 @@
 #ifndef IOT_GATEWAY_EPOLL_WORKER_H
 #define IOT_GATEWAY_EPOLL_WORKER_H
 
+#include <stddef.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -47,6 +48,27 @@ void epoll_worker_destroy(void);
  * @param generation The connection generation captured at collect time.
  */
 void epoll_worker_request_close(int fd, uint64_t generation);
+
+/**
+ * @brief Request the epoll thread to send a downlink frame to a connection.
+ *
+ * Thread-safe. Writes the encoded frame into the self-pipe; the epoll thread
+ * validates the connection by fd + generation, then performs a best-effort
+ * non-blocking send() (MSG_NOSIGNAL). If the connection is gone or the fd was
+ * reused by a newer connection, the frame is dropped.
+ *
+ * All client-fd I/O stays in the epoll thread; worker threads only enqueue
+ * requests through the self-pipe.
+ *
+ * @param fd         The target client fd.
+ * @param generation The connection generation captured when the task was queued.
+ * @param frame      The fully encoded frame (header + CRC included).
+ * @param len        Length of @p frame.
+ *
+ * @return 0 on success, -1 on invalid args or pipe write failure.
+ */
+int epoll_worker_request_send(int fd, uint64_t generation,
+                              const uint8_t *frame, size_t len);
 
 int epoll_worker_run(int listen_fd);
 

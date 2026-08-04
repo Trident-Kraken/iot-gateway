@@ -62,6 +62,19 @@ void conn_manager_remove(int fd);
 void conn_manager_update_active_time(int fd);
 
 /**
+ * @brief 按文件描述符查询连接代际号。
+ *
+ * 用于工作线程在发起下行响应前核对连接是否仍是同一代（fd 复用防护），
+ * 与 epoll_worker 的 generation 双重匹配配套。
+ *
+ * @param fd  客户端文件描述符。
+ * @param gen 输出参数：成功时写入代际号。
+ *
+ * @return 0 成功，-1 未找到（该 fd 无对应连接）。
+ */
+int conn_manager_get_generation(int fd, uint64_t *gen);
+
+/**
  * @brief 带回调遍历所有连接条目。
  *
  * 回调在连接管理器锁内执行。调用方不得在回调中执行长时间工作，

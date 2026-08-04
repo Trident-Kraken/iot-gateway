@@ -122,6 +122,32 @@ void conn_manager_update_active_time(int fd)
     pthread_mutex_unlock(&g_mutex);
 }
 
+int conn_manager_get_generation(int fd, uint64_t *gen)
+{
+    struct conn_entry *entry;
+
+    if (!g_initialized || fd < 0 || gen == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    pthread_mutex_lock(&g_mutex);
+
+    entry = g_head;
+    while (entry != NULL) {
+        if (entry->fd == fd) {
+            *gen = entry->generation;
+            pthread_mutex_unlock(&g_mutex);
+            return 0;
+        }
+        entry = entry->next;
+    }
+
+    pthread_mutex_unlock(&g_mutex);
+    errno = ENOENT;
+    return -1;
+}
+
 void conn_manager_foreach(void (*callback)(struct conn_entry *, void *), void *arg)
 {
     struct conn_entry *entry;

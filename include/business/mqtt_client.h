@@ -15,10 +15,12 @@ extern "C" {
  * @param port      Broker 端口，如 1883。
  * @param client_id MQTT 客户端 ID（用于 CONNECT 报文）。传 NULL 则由
  *                  libmosquitto 自动生成。
+ * @param qos       发布 QoS（0/1/2），范围外自动回退为 0。
  *
  * @return 0 成功，-1 失败（Broker 不可达或内存不足）。
  */
-int mqtt_client_init(const char *broker, int port, const char *client_id);
+int mqtt_client_init(const char *broker, int port, const char *client_id,
+                     int qos);
 
 /**
  * @brief 以 QoS 0 发布一条消息到指定 Topic。
@@ -35,13 +37,16 @@ int mqtt_client_init(const char *broker, int port, const char *client_id);
  * 多个工作线程可并发调用；MQTT 管理线程驱动 mosquitto_loop() 负责实际网络
  * 发送与 PINGREQ/keepalive。
  *
- * 发布为 QoS0 fire-and-forget：仅入队即返回，失败时 fast-fail 丢弃消息并
- * 由管理线程自动重连，不影响网关继续运行。
+ * 发布语义：已连接时消息立即提交给 libmosquitto；未连接（broker 不可达）时
+ * 进入有界离线缓存（MQTT_CACHE_MAX 条，满则淘汰最旧），管理线程重连成功后
+ * 锁外冲刷。两种情况下调用均快速返回，工作线程永不被 broker 阻塞。
+ * QoS 1/2 的确认与重传由 mosquitto_loop() 的 inflight 机制处理，on_publish
+ * 回调记录每次 PUBACK/PUBCOMP。
  *
  * @param topic   MQTT Topic，如 "sensor/data"。
  * @param payload 消息体（C 字符串，JSON 格式）。
  *
- * @return 0 成功（消息已提交给 libmosquitto），-1 失败（未连接/发布失败）。
+ * @return 0 成功（消息已接受：立即提交或进入离线缓存），-1 参数非法/未初始化。
 */
 int mqtt_publish(const char *topic, const char *payload);
 

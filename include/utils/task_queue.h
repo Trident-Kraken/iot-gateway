@@ -17,6 +17,7 @@ extern "C" {
  * 或完整的编码帧）。cmd 是从帧头中提取的协议命令字节。 */
 struct task {
     int      fd;        /* 来源连接的文件描述符。*/
+    uint64_t generation; /* 连接代际号：下行响应前核对，防 fd 复用误发。*/
     uint8_t  frame[PROTOCOL_MAX_FRAME_SIZE];/* 待处理的原始帧字节。*/
     size_t   frame_len; /* frame[] 中的有效字节数。*/
     uint8_t  cmd;       /* 协议命令码。*/

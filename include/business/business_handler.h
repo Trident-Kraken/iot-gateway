@@ -30,7 +30,8 @@ extern "C" {
  */
 
 /** 命令处理函数指针类型。 */
-typedef void (*cmd_handler_t)(int fd, const uint8_t *payload, size_t len);
+typedef void (*cmd_handler_t)(int fd, uint64_t generation,
+                              const uint8_t *payload, size_t len);
 
 /* =========================================================================
  * 业务处理函数（每个对应一种命令字）
@@ -45,22 +46,42 @@ typedef void (*cmd_handler_t)(int fd, const uint8_t *payload, size_t len);
  * 使用轻量字符串解析（strstr + sscanf），无需 cJSON，适合两周项目。
  * 解析后重新打包 JSON，通过 mqtt_publish() 上报至云端。
  *
- * @param fd      来源连接的文件描述符。
- * @param payload Payload 字节首地址（不含帧头/长度/命令/CRC）。
- * @param len     Payload 长度（字节数）。
+ * @param fd         来源连接的文件描述符。
+ * @param generation 连接代际号（任务入队时记录，供下行响应防 fd 复用）。
+ * @param payload    Payload 字节首地址（不含帧头/长度/命令/CRC）。
+ * @param len        Payload 长度（字节数）。
  */
-void handle_sensor_data(int fd, const uint8_t *payload, size_t len);
+void handle_sensor_data(int fd, uint64_t generation,
+                        const uint8_t *payload, size_t len);
 
 /**
  * @brief 处理心跳包（CMD_HEARTBEAT = 0x02）。
  *
  * 更新连接的 last_active_time，并可选发送心跳响应。
  *
- * @param fd      来源连接的文件描述符。
- * @param payload Payload 字节首地址（可为 NULL，心跳包通常无 payload）。
- * @param len     Payload 长度（心跳包通常为 0）。
+ * @param fd         来源连接的文件描述符。
+ * @param generation 连接代际号（本 handler 不使用，保留下行扩展能力）。
+ * @param payload    Payload 字节首地址（可为 NULL，心跳包通常无 payload）。
+ * @param len        Payload 长度（心跳包通常为 0）。
  */
-void handle_heartbeat(int fd, const uint8_t *payload, size_t len);
+void handle_heartbeat(int fd, uint64_t generation,
+                      const uint8_t *payload, size_t len);
+
+/**
+ * @brief 处理配置请求（CMD_CONFIG = 0x03，下行）。
+ *
+ * 设备发送 CMD_CONFIG 帧（Payload 可为空或 JSON 请求）时，网关回复一帧
+ * 携带默认设备配置 JSON 的 CMD_CONFIG 帧（网关 → 设备下行）。下行帧通过
+ * epoll_worker_request_send() 委托 epoll 线程发送，fd + generation 双重
+ * 匹配确保不会误发给 fd 复用后的新连接。
+ *
+ * @param fd         来源连接的文件描述符。
+ * @param generation 连接代际号（防 fd 复用误发）。
+ * @param payload    请求 Payload 字节首地址（可为 NULL）。
+ * @param len        Payload 长度。
+ */
+void handle_config(int fd, uint64_t generation,
+                   const uint8_t *payload, size_t len);
 
 /* =========================================================================
  * 初始化与分发入口

@@ -7,6 +7,7 @@
 
 #include "business/business_handler.h"
 #include "utils/config_parser.h"
+#include "gateway/conn_manager.h"
 #include "gateway/heartbeat.h"
 #include "utils/logger.h"
 #include "business/mqtt_client.h"
@@ -28,6 +29,7 @@ int main(int argc, char *argv[])
     enum log_level log_level;
     const char *mqtt_broker;
     int mqtt_port;
+    int mqtt_qos;
     int listen_fd;
 
     (void)argc;
@@ -71,9 +73,17 @@ int main(int argc, char *argv[])
 
     mqtt_broker = config_get_string("mqtt_broker", "localhost");
     mqtt_port = config_get_int("mqtt_port", 1883);
+    mqtt_qos = config_get_int("mqtt_qos", 0);
 
     if (mqtt_port <= 0 || mqtt_port > 65535) {
         LOG_ERROR("invalid mqtt_port=%d (must be 1..65535)", mqtt_port);
+        logger_destroy();
+        config_free();
+        return EXIT_FAILURE;
+    }
+
+    if (mqtt_qos < 0 || mqtt_qos > 2) {
+        LOG_ERROR("invalid mqtt_qos=%d (must be 0..2)", mqtt_qos);
         logger_destroy();
         config_free();
         return EXIT_FAILURE;
@@ -83,15 +93,16 @@ int main(int argc, char *argv[])
     LOG_INFO("config loaded from %s", config_path);
     LOG_INFO("server_port=%d thread_pool_size=%d "
              "heartbeat_interval=%d heartbeat_timeout=%d log_level=%s "
-             "mqtt_broker=%s mqtt_port=%d",
+             "mqtt_broker=%s mqtt_port=%d mqtt_qos=%d",
              server_port, thread_pool_size, heartbeat_interval,
-             heartbeat_timeout, log_level_str, mqtt_broker, mqtt_port);
+             heartbeat_timeout, log_level_str, mqtt_broker, mqtt_port,
+             mqtt_qos);
 
     /* 初始化命令分发表（必须在工作线程启动前完成）。*/
     cmd_handlers_init();
 
     /* 初始化MQTT 客户端（连接 Mosquitto Broker）。*/
-    if (mqtt_client_init(mqtt_broker, mqtt_port, NULL) != 0) {
+    if (mqtt_client_init(mqtt_broker, mqtt_port, NULL, mqtt_qos) != 0) {
         LOG_ERROR("failed to initialize MQTT client");
         logger_destroy();
         config_free();
@@ -176,6 +187,14 @@ void on_frame_complete(int fd, const uint8_t *frame, size_t len)
 
     memset(&t, 0, sizeof(t));
     t.fd = fd;
+
+    /* 记录连接代际号：下行响应（如 CMD_CONFIG）发送前据此防 fd 复用误发。 */
+    if (conn_manager_get_generation(fd, &t.generation) != 0) {
+        /* 理论上不会发生（本回调运行在 epoll 线程、连接尚存活）；
+         * 防御性置 0，使后续下行发送被 generation 匹配拒绝。 */
+        t.generation = 0;
+    }
+
     t.frame_len = len;
     memcpy(t.frame, frame, len);
 
