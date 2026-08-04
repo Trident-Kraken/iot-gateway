@@ -183,8 +183,9 @@ void handle_sensor_data(int fd, uint64_t generation,
     (void)json_extract(json_str, len, "timestamp",
                        ts_str, sizeof(ts_str));
 
-    LOG_INFO("handle_sensor_data: fd=%d device=%s temp=%s hum=%s ts=%s",
-             fd, device_id, temp_str, hum_str, ts_str);
+    /* 高频路径（每帧一条）：用 DEBUG 避免刷屏与日志 I/O 瓶颈。 */
+    LOG_DEBUG("handle_sensor_data: fd=%d device=%s temp=%s hum=%s ts=%s",
+              fd, device_id, temp_str, hum_str, ts_str);
 
     /* 3. 重新打包为标准 JSON 并上报 MQTT。 */
     mqtt_json_len = snprintf(mqtt_json, sizeof(mqtt_json),

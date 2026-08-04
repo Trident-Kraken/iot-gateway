@@ -15,7 +15,16 @@ enum log_level {
     LOG_LEVEL_ERROR = 2
 };
 
-/* 全局日志级别过滤器（可由 logger_set_level 和配置修改）。 */
+/*
+ * 全局日志级别过滤器。
+ *
+ * 为什么是全局（而非 static）：LOG_* 宏在调用点直接读取该值做零开销
+ * 级别过滤，头文件宏无法访问 static 变量，必须 extern 暴露。
+ *
+ * 线程安全说明：本值仅在 logger_init()（所有线程启动前，单线程）写入，
+ * 之后所有线程只读；logger_set_level() 为预留接口，当前无并发调用方。
+ * 若未来需运行时并发修改日志级别，应改为原子类型或加锁。
+ */
 extern enum log_level g_log_level;
 
 /**
