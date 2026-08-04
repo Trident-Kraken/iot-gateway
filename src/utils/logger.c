@@ -11,7 +11,7 @@
 #include <time.h>
 #include <pthread.h>
 
-/* 当日志文件超过此字节数时轮转�?*/
+/* 当日志文件超过此字节数时轮转。 */
 #define LOG_MAX_SIZE (10 * 1024 * 1024)
 
 static FILE *g_log_fp = NULL;
@@ -21,7 +21,7 @@ static size_t g_log_size = 0;
 /* Protects g_log_fp, g_log_size, and log rotation from concurrent worker threads. */
 static pthread_mutex_t g_log_mutex = PTHREAD_MUTEX_INITIALIZER;
 
-/* 全局日志级别（也可由配置文件修改）�?*/
+/* 全局日志级别（也可由配置文件修改）。 */
 enum log_level g_log_level = LOG_LEVEL_INFO;
 
 int logger_init(const char *path, enum log_level level)
@@ -103,8 +103,10 @@ enum log_level logger_level_from_string(const char *str)
 }
 
 /**
- * @brief 当日志文件超�?LOG_MAX_SIZE 时轮转�? *
- * 当前文件被关闭并重命名为 "<path>.1"。然后打开一个新的空日志文件�? */
+ * @brief 当日志文件超过 LOG_MAX_SIZE 时轮转。
+ *
+ * 当前文件被关闭并重命名为 "<path>.1"，然后打开一个新的空日志文件。
+ */
 static int logger_rotate(void)
 {
     char rotated_path[1024];
@@ -124,7 +126,7 @@ static int logger_rotate(void)
     (void)remove(rotated_path);
 
     if (rename(g_log_path, rotated_path) != 0) {
-        /* 尝试重新打开原文件�?*/
+        /* 尝试重新打开原文件。 */
         g_log_fp = fopen(g_log_path, "a");
         return -1;
     }
@@ -195,7 +197,7 @@ void logger_log(enum log_level level, const char *file, int line,
         message[message_len] = '\0';
     }
 
-    /* 写前做简单的轮转检查�?*/
+    /* 写前做简单的轮转检查。 */
     (void)logger_rotate();
 
     if (g_log_fp == NULL) {

@@ -38,9 +38,11 @@ static int g_timeout_sec = 15;
 static int g_started = 0;
 
 /**
- * @brief conn_manager_foreach() 的回调：收集过期文件描述符。 *
- * 本回调在 conn_manager 锁内执行，因此只记录过期的fd，不执行任何 I/O
- * 或长时间工作。 */
+ * @brief conn_manager_foreach() 的回调：收集过期文件描述符。
+ *
+ * 本回调在 conn_manager 锁内执行，因此只记录过期的 fd，不执行任何 I/O
+ * 或长时间工作。
+ */
 static void collect_stale(struct conn_entry *entry, void *arg)
 {
     struct stale_collect_ctx *ctx = arg;

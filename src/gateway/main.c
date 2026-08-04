@@ -181,7 +181,9 @@ int main(int argc, char *argv[])
 }
 
 /*
- * packet_parser 在完整帧组装完毕后调用的回调函数。 * 帧被转发到工作线程池进行业务处理。 */
+ * packet_parser 在完整帧组装完毕后调用的回调函数。
+ * 帧被转发到工作线程池进行业务处理。
+ */
 void on_frame_complete(int fd, const uint8_t *frame, size_t len)
 {
     struct task t;

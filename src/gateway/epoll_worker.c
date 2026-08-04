@@ -27,9 +27,11 @@ static int g_close_pipe[2] = { -1, -1 };
 static struct connection *g_conn_list = NULL;
 
 /**
- * @brief 存储在epoll_event.data.ptr 中的每连接上下文。 *
- * packet_parser 内部拥有每连接RingBuffer，因此epoll_worker 只需
- * 跟踪 fd 以及该上下文是否属于监听 socket。 */
+ * @brief 存储在 epoll_event.data.ptr 中的每连接上下文。
+ *
+ * packet_parser 内部拥有每连接 RingBuffer，因此 epoll_worker 只需
+ * 跟踪 fd 以及该上下文是否属于监听 socket。
+ */
 struct connection {
     int       fd;
     uint64_t  generation; /* 连接代际号：accept 时递增分配，fd 复用后用于区分。 */
@@ -109,10 +111,14 @@ struct pipe_msg {
 };
 
 /**
- * @brief 将文件描述符设置为非阻塞模式。 *
- * server.c 中已有重复的辅助函数；保留在此处以保持模块自包含。 * 后续可移到共享工具模块。 *
- * @param fd 待修改的文件描述符。 *
- * @return 成功返回 0，失败返回-1 并设置errno。 */
+ * @brief 将文件描述符设置为非阻塞模式。
+ *
+ * server.c 中已有重复的辅助函数；保留在此处以保持模块自包含，
+ * 后续可移到共享工具模块。
+ *
+ * @param fd 待修改的文件描述符。
+ * @return 成功返回 0，失败返回 -1 并设置 errno。
+ */
 static int set_nonblocking(int fd)
 {
     int flags;
@@ -267,10 +273,15 @@ int epoll_worker_request_send(int fd, uint64_t generation,
 
 
 /**
- * @brief 向epoll 实例注册一个文件描述符。 *
- * 使用 ET 模式，因此调用方负责在每次通知后排空fd。 *
- * @param epoll_fd epoll 实例。 * @param fd       待注册的文件描述符。 * @param conn     存储在event.data.ptr 中的连接上下文指针。 *
- * @return 成功返回 0，失败返回-1。 */
+ * @brief 向 epoll 实例注册一个文件描述符。
+ *
+ * 使用 ET 模式，因此调用方负责在每次通知后排空 fd。
+ *
+ * @param epoll_fd epoll 实例。
+ * @param fd       待注册的文件描述符。
+ * @param conn     存储在 event.data.ptr 中的连接上下文指针。
+ * @return 成功返回 0，失败返回 -1。
+ */
 static int epoll_add(int epoll_fd, int fd, struct connection *conn)
 {
     struct epoll_event ev;
@@ -289,8 +300,11 @@ static int epoll_add(int epoll_fd, int fd, struct connection *conn)
 }
 
 /**
- * @brief 从epoll 实例移除一个文件描述符并关闭它。 *
- * @param epoll_fd epoll 实例。 * @param conn     待清理的连接上下文。 */
+ * @brief 从 epoll 实例移除一个文件描述符并关闭它。
+ *
+ * @param epoll_fd epoll 实例。
+ * @param conn     待清理的连接上下文。
+ */
 static void connection_close(int epoll_fd, struct connection *conn)
 {
     if (conn == NULL) {
@@ -321,9 +335,15 @@ static void connection_close(int epoll_fd, struct connection *conn)
 }
 
 /**
- * @brief 接受监听 socket 上的所有待处理连接。 *
- * 在ET 模式下，epoll_wait() 仅在监听 backlog 从空变为非空时返回一次。 * 我们必须循环 accept() 直到返回 -1 且errno == EAGAIN/EWOULDBLOCK， * 表示就绪队列已排空。 *
- * @param epoll_fd  epoll 实例。 * @param listen_fd 监听 socket。 */
+ * @brief 接受监听 socket 上的所有待处理连接。
+ *
+ * 在 ET 模式下，epoll_wait() 仅在监听 backlog 从空变为非空时返回一次，
+ * 我们必须循环 accept() 直到返回 -1 且 errno == EAGAIN/EWOULDBLOCK，
+ * 表示就绪队列已排空。
+ *
+ * @param epoll_fd  epoll 实例。
+ * @param listen_fd 监听 socket。
+ */
 static void handle_listen(int epoll_fd, int listen_fd)
 {
     for (;;) {
@@ -393,11 +413,17 @@ static void handle_listen(int epoll_fd, int listen_fd)
 }
 
 /**
- * @brief 在ET 模式下从客户端socket 读取所有可用数据。 *
- * 使用 EPOLLET 时，epoll_wait() 仅当 socket 从不可读变为可读时通知我们。 * 我们必须循环 recv() 直到返回 -1 且errno == EAGAIN/EWOULDBLOCK，以确保
- * 内核接收缓冲区中的每个字节都被移入连接RingBuffer。如果字节遗留在接收
- * 缓冲区中，它们将一直处于内核缓冲区，且在收到新数据之前不会有epoll 通知。 *
- * @param epoll_fd epoll 实例。 * @param conn     客户端连接上下文。 */
+ * @brief 在 ET 模式下从客户端 socket 读取所有可用数据。
+ *
+ * 使用 EPOLLET 时，epoll_wait() 仅当 socket 从不可读变为可读时通知我们，
+ * 我们必须循环 recv() 直到返回 -1 且 errno == EAGAIN/EWOULDBLOCK，以
+ * 确保内核接收缓冲区中的每个字节都被移入连接 RingBuffer。如果字节遗留
+ * 在接收缓冲区中，它们将一直处于内核缓冲区，且在收到新数据之前不会有
+ * epoll 通知。
+ *
+ * @param epoll_fd epoll 实例。
+ * @param conn     客户端连接上下文。
+ */
 static void handle_client(int epoll_fd, struct connection *conn)
 {
     char recv_buf[4096];
