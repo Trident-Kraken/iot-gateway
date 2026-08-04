@@ -39,3 +39,11 @@ add_test(
 )
 set_tests_properties(integration_connection_lifecycle
                      PROPERTIES TIMEOUT 60 SKIP_RETURN_CODE 77)
+
+# MQTT 离线缓存恢复：broker 停机期间消息入缓存，恢复后冲刷（自带 broker，端口 1884）。
+add_test(
+    NAME integration_mqtt_offline_cache
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_mqtt_offline_cache.py
+)
+set_tests_properties(integration_mqtt_offline_cache
+                     PROPERTIES TIMEOUT 90 SKIP_RETURN_CODE 77)
