@@ -1,15 +1,24 @@
 #include "utils/task_queue.h"
 
 #include <errno.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+/* 任务节点对象池容量：也是任务队列的有界水位线（满则拒绝入队，防止无界增长）。 */
+#define TASK_POOL_CAPACITY 2048
 
 /* 链式节点，存放一个任务。 */
 struct task_node {
     struct task       task;
     struct task_node *next;
 };
+
+/* 任务节点对象池：固定数组 + LIFO 空闲链（g_mutex 保护）。
+ * epoll 线程 push / 工作线程 pop 均零动态分配，符合 AGENTS §2.3。 */
+static struct task_node   g_task_pool[TASK_POOL_CAPACITY];
+static struct task_node  *g_free_nodes = NULL;
 
 /* 全局单例队列状态。 */
 static pthread_mutex_t g_mutex     = PTHREAD_MUTEX_INITIALIZER;
@@ -18,6 +27,21 @@ static struct task_node *g_head    = NULL;
 static struct task_node *g_tail    = NULL;
 static int              g_shutdown = 0;
 static int              g_initialized = 0;
+
+/* 构建空闲链（启动时单线程调用，无需加锁）。 */
+static void task_pool_init(void)
+{
+    size_t i;
+
+    if (g_free_nodes != NULL) {
+        return;
+    }
+
+    for (i = 0; i < TASK_POOL_CAPACITY; i++) {
+        g_task_pool[i].next = g_free_nodes;
+        g_free_nodes = &g_task_pool[i];
+    }
+}
 
 int task_queue_init(void)
 {
@@ -44,6 +68,8 @@ int task_queue_init(void)
     g_shutdown = 0;
     g_initialized = 1;
 
+    task_pool_init();
+
     return 0;
 }
 
@@ -56,10 +82,12 @@ void task_queue_destroy(void)
         return;
     }
 
+    /* 将队列中残留节点归还对象池（销毁时队列应已排空，防御性处理）。 */
     node = g_head;
     while (node != NULL) {
         next = node->next;
-        free(node);
+        node->next = g_free_nodes;
+        g_free_nodes = node;
         node = next;
     }
 
@@ -87,26 +115,29 @@ int task_queue_push(const struct task *task)
         return -1;
     }
 
-    node = malloc(sizeof(*node));
-    if (node == NULL) {
-        return -1;
-    }
-
-    node->task = *task;
-    node->next = NULL;
-
     /*
-     * 锁粒度：仅对链表操作和条件变量信号持有互斥锁。调用方的任务对象
-     * 已被复制，因此锁下不执行任何长时间工作。
+     * 锁粒度：仅对链表操作、对象池取节点与条件变量信号持有互斥锁。调用方
+     * 的任务对象已被复制，因此锁下不执行任何长时间工作。
      */
     pthread_mutex_lock(&g_mutex);
 
     if (g_shutdown) {
         pthread_mutex_unlock(&g_mutex);
-        free(node);
         errno = ESHUTDOWN;
         return -1;
     }
+
+    /* 从对象池取节点（零分配）。池耗尽 = 队列已满（有界水位线）。 */
+    node = g_free_nodes;
+    if (node == NULL) {
+        pthread_mutex_unlock(&g_mutex);
+        errno = ENOMEM;
+        return -1;
+    }
+    g_free_nodes = node->next;
+
+    node->task = *task;
+    node->next = NULL;
 
     if (g_tail == NULL) {
         g_head = node;
@@ -125,7 +156,6 @@ int task_queue_push(const struct task *task)
 struct task *task_queue_pop(void)
 {
     struct task_node *node;
-    struct task *task;
 
     if (!g_initialized) {
         errno = EINVAL;
@@ -162,16 +192,29 @@ struct task *task_queue_pop(void)
 
     pthread_mutex_unlock(&g_mutex);
 
-    task = malloc(sizeof(*task));
+    /*
+     * 返回对象池节点内嵌的 task（节点已出队，仍属对象池占用）。
+     * 调用方处理完毕后必须调用 task_queue_release() 归还节点，零分配。
+     */
+    return &node->task;
+}
+
+void task_queue_release(struct task *task)
+{
+    struct task_node *node;
+
     if (task == NULL) {
-        free(node);
-        return NULL;
+        return;
     }
 
-    *task = node->task;
-    free(node);
+    /* container_of：task 是 struct task_node 的首成员。 */
+    node = (struct task_node *)((char *)task -
+                                offsetof(struct task_node, task));
 
-    return task;
+    pthread_mutex_lock(&g_mutex);
+    node->next = g_free_nodes;
+    g_free_nodes = node;
+    pthread_mutex_unlock(&g_mutex);
 }
 
 void task_queue_shutdown(void)

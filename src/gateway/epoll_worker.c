@@ -40,6 +40,55 @@ struct connection {
 /* 连接代际计数器（仅 epoll 线程访问，无需加锁）。 */
 static uint64_t g_generation = 0;
 
+/* 客户端连接上下文对象池容量（固定上限：超出后 accept 被拒绝并记日志）。 */
+#define CONN_POOL_CAPACITY 1024
+
+/* 客户端连接上下文对象池：固定数组 + LIFO 空闲链。
+ * 仅 epoll 线程访问（accept/connection_close 均在其上下文中），无需加锁，
+ * 符合 AGENTS §2.3「只实现项目够用的连接池」。 */
+static struct connection g_conn_pool[CONN_POOL_CAPACITY];
+static struct connection *g_conn_free = NULL;
+
+static void conn_pool_init(void)
+{
+    size_t i;
+
+    if (g_conn_free != NULL) {
+        return;
+    }
+
+    for (i = 0; i < CONN_POOL_CAPACITY; i++) {
+        g_conn_pool[i].next = g_conn_free;
+        g_conn_free = &g_conn_pool[i];
+    }
+}
+
+static struct connection *conn_pool_acquire(void)
+{
+    struct connection *conn;
+
+    if (g_conn_free == NULL) {
+        conn_pool_init();
+    }
+
+    conn = g_conn_free;
+    if (conn != NULL) {
+        g_conn_free = conn->next;
+        memset(conn, 0, sizeof(*conn)); /* 与 calloc 行为一致。 */
+    }
+    return conn;
+}
+
+static void conn_pool_release(struct connection *conn)
+{
+    if (conn == NULL) {
+        return;
+    }
+
+    conn->next = g_conn_free;
+    g_conn_free = conn;
+}
+
 /* self-pipe 消息类型。 */
 enum {
     PIPE_MSG_CLOSE = 1, /* 关闭连接（心跳线程委托）。 */
@@ -268,7 +317,7 @@ static void connection_close(int epoll_fd, struct connection *conn)
     }
 
     close(conn->fd);
-    free(conn);
+    conn_pool_release(conn);
 }
 
 /**
@@ -312,10 +361,10 @@ static void handle_listen(int epoll_fd, int listen_fd)
             continue;
         }
 
-        conn = calloc(1, sizeof(*conn));
+        conn = conn_pool_acquire();
         if (conn == NULL) {
-            LOG_ERROR("handle_listen: calloc failed, closing fd=%d",
-                      client_fd);
+            LOG_ERROR("handle_listen: connection pool exhausted (%d), "
+                      "closing fd=%d", CONN_POOL_CAPACITY, client_fd);
             conn_manager_remove(client_fd);
             packet_parser_unregister(client_fd);
             close(client_fd);

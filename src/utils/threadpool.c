@@ -61,7 +61,9 @@ static void *worker_thread(void *arg)
          * 在锁下进行。这使临界区极小，并允许多个工作线程并行处理任务。
          */
         worker_process_task(task);
-        free(task);
+
+        /* 任务节点属对象池，归还而非 free()（零分配热路径）。 */
+        task_queue_release(task);
     }
 
     return NULL;

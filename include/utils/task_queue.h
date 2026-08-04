@@ -45,8 +45,15 @@ int task_queue_push(const struct task *task);
 /**
  * @brief 从全局队列弹出一个任务，必要时阻塞。 *
  * 如果队列为空，调用线程阻塞在条件变量上，直到有任务被推送或队列被关闭。 *
- * @return 成功返回指向已分配任务的指针，队列已关闭且为空时返回 NULL。 *         调用方负责使用free() 释放返回的指针。 */
+ * 返回的任务属于内部对象池（零分配）；调用方处理完毕后必须调用
+ * task_queue_release() 归还，不得 free()。 *
+ * @return 成功返回指向任务（对象池节点内嵌）的指针，队列已关闭且为空时返回 NULL。 */
 struct task *task_queue_pop(void);
+
+/**
+ * @brief 将 task_queue_pop() 返回的任务归还对象池。 *
+ * 仅在任务处理完成后调用一次；线程安全（内部加锁）。 */
+void task_queue_release(struct task *task);
 
 /**
  * @brief 关闭队列并唤醒所有阻塞的 pop() 调用者。 *

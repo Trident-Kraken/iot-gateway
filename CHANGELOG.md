@@ -20,6 +20,11 @@
 - `feat(mqtt)`: 新增 `mqtt_qos` 配置（0/1/2，默认 0）贯穿发布链路；注册 `on_publish` 回调记录 PUBACK/PUBCOMP，QoS1/2 确认与重传交由 `mosquitto_loop()` inflight 机制。
 - `fix(epoll)`: self-pipe 消息结构体写入前清零，消除向管道写入未初始化字节（valgrind 告警）。
 
+### 新增（Day3 P1：关键路径对象池）
+
+- `feat(pool)`: 任务节点固定对象池（2048），`task_queue` push/pop/release 零动态分配；队列从无界链表变为有界（满则 `ENOMEM` 拒绝入队，实现架构文档建议的水位线）。
+- `feat(pool)`: 连接上下文固定对象池（1024），epoll 线程 accept/close 零动态分配；超出容量拒绝 accept 并记日志。
+
 ## [0.1.0] - 2026-08-04
 
 ### 新增
