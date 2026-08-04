@@ -4,11 +4,12 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <netinet/in.h>
-#include <stdio.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <unistd.h>
+
+#include "utils/logger.h"
 
 #define SERVER_LISTEN_BACKLOG 128
 
@@ -43,7 +44,7 @@ int server_init(uint16_t port)
 
     listen_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (listen_fd == -1) {
-        fprintf(stderr, "server_init: socket failed: %s\n", strerror(errno));
+        LOG_ERROR("server_init: socket failed: %s", strerror(errno));
         return -1;
     }
 
@@ -51,8 +52,8 @@ int server_init(uint16_t port)
     opt = 1;
     if (setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR,
                    &opt, sizeof(opt)) == -1) {
-        fprintf(stderr, "server_init: setsockopt SO_REUSEADDR failed: %s\n",
-                strerror(errno));
+        LOG_ERROR("server_init: setsockopt SO_REUSEADDR failed: %s",
+              strerror(errno));
         close(listen_fd);
         return -1;
     }
@@ -63,21 +64,21 @@ int server_init(uint16_t port)
     addr.sin_port = htons(port);
 
     if (bind(listen_fd, (struct sockaddr *)&addr, sizeof(addr)) == -1) {
-        fprintf(stderr, "server_init: bind port %u failed: %s\n",
-                (unsigned int)port, strerror(errno));
+        LOG_ERROR("server_init: bind port %u failed: %s",
+              (unsigned int)port, strerror(errno));
         close(listen_fd);
         return -1;
     }
 
     if (set_nonblocking(listen_fd) == -1) {
-        fprintf(stderr, "server_init: set_nonblocking failed: %s\n",
-                strerror(errno));
+        LOG_ERROR("server_init: set_nonblocking failed: %s",
+              strerror(errno));
         close(listen_fd);
         return -1;
     }
 
     if (listen(listen_fd, SERVER_LISTEN_BACKLOG) == -1) {
-        fprintf(stderr, "server_init: listen failed: %s\n", strerror(errno));
+        LOG_ERROR("server_init: listen failed: %s", strerror(errno));
         close(listen_fd);
         return -1;
     }
@@ -113,8 +114,7 @@ int server_accept(int listen_fd)
                 return -1;
             }
 
-            fprintf(stderr, "server_accept: accept failed: %s\n",
-                    strerror(errno));
+            LOG_ERROR("server_accept: accept failed: %s", strerror(errno));
             return -1;
         }
 
@@ -122,8 +122,8 @@ int server_accept(int listen_fd)
     }
 
     if (set_nonblocking(client_fd) == -1) {
-        fprintf(stderr, "server_accept: set_nonblocking failed: %s\n",
-                strerror(errno));
+        LOG_ERROR("server_accept: set_nonblocking failed: %s",
+              strerror(errno));
         close(client_fd);
         return -1;
     }
