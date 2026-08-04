@@ -31,3 +31,11 @@ add_test(
     COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/run_e2e.sh
 )
 set_tests_properties(integration_e2e PROPERTIES TIMEOUT 120 SKIP_RETURN_CODE 77)
+
+# 连接生命周期：心跳超时断开 / 半包断开 / fd 无泄漏（自带网关实例，端口 8081）。
+add_test(
+    NAME integration_connection_lifecycle
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_connection_lifecycle.py
+)
+set_tests_properties(integration_connection_lifecycle
+                     PROPERTIES TIMEOUT 60 SKIP_RETURN_CODE 77)
