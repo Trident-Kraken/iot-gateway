@@ -21,3 +21,13 @@ add_executable(test_config
 target_include_directories(test_config PRIVATE ${CMAKE_SOURCE_DIR}/include)
 
 add_test(NAME unit_config COMMAND test_config)
+
+# task_queue 单元测试（对象池 FIFO / 有界水位线 / 关闭语义）。
+add_executable(test_task_queue
+    test_task_queue.c
+    ${CMAKE_SOURCE_DIR}/src/utils/task_queue.c
+)
+
+target_include_directories(test_task_queue PRIVATE ${CMAKE_SOURCE_DIR}/include)
+
+add_test(NAME unit_task_queue COMMAND test_task_queue)
