@@ -37,31 +37,20 @@ size_t rb_write(ringbuffer_t *rb, const void *data, size_t len)
         return 0;
     }
 
-    src = data;
-
     /*
-     * 超大输入：只保留最近 RB_CAPACITY 字节。
-     * 这是本网关要求的循环覆盖语义。
-     */
-    if (len >= RB_CAPACITY) {
-        src = (const uint8_t *)data + len - RB_CAPACITY;
-        memcpy(rb->buf, src, RB_CAPACITY);
-        rb->head = 0;
-        rb->tail = 0;
-        rb->len = RB_CAPACITY;
-        return RB_CAPACITY;
-    }
-
-    /*
-     * 正常情况：如果可用空间不足，推进读取指针以丢弃最旧的字节。
-     * 这样可以保留最新的数据。
+     * 满则拒绝：只写入当前可用空间，绝不覆盖尚未被解析器消费的旧数据。
+     * 空间不足时返回实际写入字节数（< len），由上层（packet_parser）决定
+     * 重置状态机并关闭连接，避免静默丢帧（AGENTS.md §5.3）。
      */
     if (len > rb_free(rb)) {
-        size_t discard = len - rb_free(rb);
-
-        rb->tail = (rb->tail + discard) % RB_CAPACITY;
-        rb->len -= discard;
+        len = rb_free(rb);
     }
+
+    if (len == 0) {
+        return 0;
+    }
+
+    src = data;
 
     for (i = 0; i < len; i++) {
         rb->buf[rb->head] = src[i];

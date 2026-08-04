@@ -48,14 +48,15 @@ void rb_destroy(ringbuffer_t *rb);
 /**
  * @brief 向 RingBuffer 写入数据。
  *
- * 如果传入数据无法完全放入，旧数据会被覆盖（循环覆盖策略）。调用方必须
- * 确保解析器足够快地排空数据，以避免丢帧。
+ * 满则拒绝：仅写入当前可用空间，不覆盖未消费的旧数据。若空间不足，返回
+ * 实际写入的字节数（可能小于 len），由调用方决定如何处理（例如 packet_parser
+ * 会重置状态机并向上层报错以关闭连接，避免静默丢帧，见 AGENTS.md §5.3）。
  *
  * @param rb   RingBuffer 句柄。
  * @param data 待写入的数据。
  * @param len  待写入的字节数。
  *
- * @return 实际写入的字节数（对于超大输入，上限为 RB_CAPACITY）。
+ * @return 实际写入的字节数（0 ~ len）。
  */
 size_t rb_write(ringbuffer_t *rb, const void *data, size_t len);
 
