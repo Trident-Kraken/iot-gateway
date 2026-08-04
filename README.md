@@ -12,7 +12,7 @@
 
 ## 技术栈
 
-C11 · epoll · pthread · RingBuffer · 自定义二进制协议 · CRC16 · MQTT(QoS 0) · libmosquitto · CMake
+C11 · epoll · pthread · RingBuffer · 自定义二进制协议 · CRC16 · MQTT(QoS 0/1/2) · libmosquitto · CMake
 
 ## 快速开始
 
@@ -47,7 +47,7 @@ python3 tests/integration/stress_test.py -c 100 -f 10 -d 60
   → RingBuffer → 状态机拆包 + CRC 校验
   → 任务队列（线程安全 FIFO）→ 工作线程取任务
   → 命令分发表 → JSON 解析 / 心跳处理
-  → MQTT publish (QoS 0) → Mosquitto Broker
+  → MQTT publish (QoS 0/1/2，可配置) → Mosquitto Broker
 ```
 
 ## 性能参考

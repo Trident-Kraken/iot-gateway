@@ -29,7 +29,7 @@
 | `PACKET_HEADER_0` / `PACKET_HEADER_1` | `0xAA` / `0x55` | 帧头 |
 | `PACKET_MIN_SIZE` | 7 | 最小帧（空 Payload） |
 | `PROTOCOL_MAX_PAYLOAD_LEN` | 1024 | 最大 Payload，防御超大帧 |
-| `PROTOCOL_MAX_FRAME_SIZE` | 1029 | 最大整帧 = 7 + 1024 |
+| `PROTOCOL_MAX_FRAME_SIZE` | 1031 | 最大整帧 = 7 + 1024 |
 
 ## 2. 命令字
 

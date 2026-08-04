@@ -23,9 +23,9 @@ int mqtt_client_init(const char *broker, int port, const char *client_id,
                      int qos);
 
 /**
- * @brief 以 QoS 0 发布一条消息到指定 Topic。
+ * @brief 按配置 QoS（0/1/2，默认 0）发布一条消息到指定 Topic。
  *
- * 工业传感器高频上报场景下使用 QoS 0 的原因：
+ * 工业传感器高频上报场景下默认使用 QoS 0 的原因：
  *   1. 低延迟 — QoS 0 是 fire-and-forget，无需等待 PUBACK，发送即完成。
  *      QoS 1/2 需要至少 2/4 次握手，在 --> 100 msg/s 场景下累积延迟不可忽略。
  *   2. 允许少量丢失 — 传感器每 1~10 秒上报一次，单条丢失仅损失一个采样点，

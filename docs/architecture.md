@@ -16,7 +16,7 @@
                                     │                                │ 完整帧
                                     ▼                                ▼
                             ┌───────────────────────────────────────────┐
-                            │          task_queue (无界 FIFO)           │
+                            │          task_queue (有界 2048)           │
                             │  pthread_mutex + pthread_cond            │
                             └──────────────────┬────────────────────────┘
                                                │ task_queue_pop
@@ -27,11 +27,11 @@
                             │    ├─ 0x01 sensor_data  → JSON → MQTT     │
                             │    └─ 0x02 heartbeat    → 刷新活跃时间     │
                             └──────────────────┬────────────────────────┘
-                                               │ mqtt_publish (QoS 0)
+                                               │ mqtt_publish (QoS 0/1/2，可配置)
                                                ▼
                             ┌───────────────────────────────────────────┐
                             │         mqtt_client (libmosquitto)         │
-                            │         3 次重连, pthread_mutex 保护        │
+                            │         无限重连, pthread_mutex 保护        │
                             └──────────────────┬────────────────────────┘
                                                │ mosquitto_publish
                                                ▼
@@ -111,7 +111,7 @@ logger.lock        →  fprintf + fflush + 轮转检查 (每次日志写入持�
 | 最大 Payload 长度 | 1024 字节 | 状态机 `temp_buf` 硬限制 |
 | 任务队列容量 | 2048 条（任务节点对象池） | 固定上限，满则 `ENOMEM` 拒绝入队（水位线），epoll 关键路径零动态分配 |
 | 心跳间隔 / 超时 | 5s / 15s | 3 次心跳未收到即断开 |
-| MQTT 重连次数 | 3 次 | 退避延迟 base×retry + rand(200)ms |
-| MQTT QoS | 0 (fire-and-forget) | 传感器高频上报，允许少量丢失 |
+| MQTT 重连 | 无限（带退避） | 退避 1 + rand()%3 秒，可被 destroy 打断 |
+| MQTT QoS | 0/1/2（配置 mqtt_qos，默认 0） | 高频遥测默认 QoS0，允许少量丢失 |
 | 帧头 | `0xAA 0x55` | 互补字节，误匹配概率 1/65536 |
 | 最大连接数 | 1024（连接对象池） | 固定上限，超出后 accept 被拒绝并记日志 |

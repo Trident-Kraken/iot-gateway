@@ -40,7 +40,7 @@
 
 - 禁止内存泄漏。所有 `malloc/calloc` 必须有对应的 `free`。
 - **epoll 线程关键路径**（`recv` → RingBuffer → 入队）应尽量避免动态分配。
-- 连接上下文、任务节点已落地固定大小对象池（epoll_worker 连接池 1024、task_queue 任务池 2048），epoll 关键路径（`recv` → RingBuffer → 入队）零动态分配；禁止实现“通用内存池”，只实现项目够用的连接池/任务池即可。
+- epoll_worker 连接上下文（struct connection）已落地固定大小对象池（1024）、task_queue 任务节点已落地固定大小任务池（2048）；`parse_ctx`（含每连接 RingBuffer）与 `conn_entry` 在连接建立/拆除路径分配（每连接一次），`recv` → RingBuffer → 入队 热路径零动态分配；禁止实现“通用内存池”，只实现项目够用的连接池/任务池即可。
 - 柔性数组成员仅用于 `struct packet` 等协议结构体，不得用于频繁分配的热路径。
 
 ### 2.4 全局状态
@@ -90,7 +90,7 @@ iot-gateway/
 | logger | `include/utils/logger.h` | `src/utils/logger.c` | 分级日志、日志轮转、互斥锁保护多线程写入 |
 | main | — | `src/gateway/main.c` | 初始化、启动、资源释放 |
 | business_handler | `include/business/business_handler.h` | `src/business/business_handler.c` | 工作线程入口：`g_cmd_handlers[256]` 函数指针分发表、`strstr` 轻量 JSON 解析、调用 `mqtt_publish` |
-| mqtt_client | `include/business/mqtt_client.h` | `src/business/mqtt_client.c` | libmosquitto 封装：QoS0 publish、异步重连线程、fast-fail 丢消息 |
+| mqtt_client | `include/business/mqtt_client.h` | `src/business/mqtt_client.c` | libmosquitto 封装：QoS0/1/2 publish（配置 `mqtt_qos`）、管理线程驱动 mosquitto_loop、断线自动重连、有界离线缓存 |
 
 > 说明：`conn_manager` 不再持有 RingBuffer（v1.4 后所有权归 `parse_ctx`）；它在 epoll 线程被 add/remove，在心跳线程被 foreach 遍历，锁粒度仅覆盖链表操作与回调，不持有期间做 I/O。
 
@@ -220,7 +220,7 @@ set(CMAKE_C_FLAGS "-Wall -Wextra")
 ## 7. 当前已知技术债（按优先级）
 
 1. **命名前缀不统一**：`gw_` 前缀未强制推行，当前函数名风格混杂，后续视时间决定是否统一。
-2. **关键路径动态分配（已解决）**：连接上下文、任务节点已改为固定大小对象池（连接池 1024、任务池 2048，见 §2.3），`recv → 入队` 热路径零动态分配；任务队列随之从无界链表变为有界（满则拒绝入队）。
+2. **关键路径动态分配（已解决）**：epoll_worker 连接上下文与任务节点已改为固定大小对象池（连接池 1024、任务池 2048，见 §2.3），`recv → 入队` 热路径零动态分配；`parse_ctx`/`conn_entry` 仍为每连接一次分配（连接建立/拆除路径）；任务队列随之从无界链表变为有界（满则拒绝入队）。
 3. **MQTT 已达成最小可用**：`mqtt_client` 实现 QoS0/1/2 publish（配置 `mqtt_qos`）+ 管理线程驱动 `mosquitto_loop()` + 断线自动重连 + 有界离线消息缓存（重连后冲刷）；`business_handler` 已接通 `CMD_SENSOR_DATA`/`CMD_HEARTBEAT`/`CMD_CONFIG`（3/256 handler，含请求/响应式配置下行）。待补项：QoS1/2 显式重传策略与离线消息持久化（当前缓存仅内存、进程重启即丢）、下行配置的真实数据源（当前回发固定默认 JSON）。
 
 ---
