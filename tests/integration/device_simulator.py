@@ -9,7 +9,7 @@ Protocol frame layout (big-endian):
     Offset  Size  Field
     ------  ----  -----
        0     2    Header: 0xAA 0x55
-       2     2    Payload length (big-endian, max 255)
+       2     2    Payload length (big-endian, max 1024)
        4     1    Command (0x01 = sensor data)
        5     N    Payload (JSON string)
      5+N     2    CRC16-CCITT-FALSE over [length + command + payload]
@@ -71,8 +71,8 @@ def build_normal_frame(device_id: str, temp: float, hum: float,
         "timestamp": timestamp,
     }).encode('utf-8')
 
-    if len(payload) > 255:
-        raise ValueError(f"Payload too long ({len(payload)} bytes, max 255)")
+    if len(payload) > 1024:
+        raise ValueError(f"Payload too long ({len(payload)} bytes, max 1024)")
 
     # Field to CRC: length(2) + cmd(1) + payload(N)
     length_field = struct.pack('>H', len(payload))
@@ -93,11 +93,11 @@ def build_crc_error_frame(device_id: str, temp: float, hum: float,
     return bytes(payload)
 
 
-def build_length_overflow_frame() -> bytes:
-    """Build a frame with payload_len > 255 (malformed)."""
-    length_field = struct.pack('>H', 300)         # illegal length
+def build_length_overflow_frame(*_args) -> bytes:
+    """Build a frame with payload_len > PROTOCOL_MAX_PAYLOAD_LEN (1024)."""
+    length_field = struct.pack('>H', 2048)        # illegal length (> 1024)
     cmd_field = bytes([CMD_SENSOR_DATA])
-    garbage = b'A' * 300
+    garbage = b'A' * 2048
     crc = crc16(length_field + cmd_field + garbage)
     crc_field = struct.pack('>H', crc)
     return HEADER + length_field + cmd_field + garbage + crc_field

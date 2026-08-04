@@ -55,3 +55,11 @@ add_test(
 )
 set_tests_properties(integration_config_validation
                      PROPERTIES TIMEOUT 60 SKIP_RETURN_CODE 77)
+
+# 故障注入：4 类异常帧 + 超大长度字段，断言网关存活且正常帧仍可达 MQTT。
+add_test(
+    NAME integration_fault_injection
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_fault_injection.py
+)
+set_tests_properties(integration_fault_injection
+                     PROPERTIES TIMEOUT 120 SKIP_RETURN_CODE 77)

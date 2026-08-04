@@ -9,7 +9,7 @@ Protocol frame layout (big-endian, must match protocol.h exactly):
     Offset  Size  Field
     ------  ----  -----
        0     2    Header: 0xAA 0x55
-       2     2    Payload length (big-endian, max 255)
+       2     2    Payload length (big-endian, max 1024)
        4     1    Command (0x01 = sensor data)
        5     N    Payload (JSON string)
      5+N     2    CRC16-CCITT-FALSE over [length + command + payload]
