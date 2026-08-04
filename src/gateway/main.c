@@ -165,17 +165,19 @@ int main(int argc, char *argv[])
 
     LOG_INFO("server listening on port %d", server_port);
 
-    /* 永久阻塞。*/
-    epoll_worker_run(listen_fd);
+    /* 永久阻塞；仅当发生致命 epoll_wait 错误时返回 -1。 */
+    int rc = epoll_worker_run(listen_fd);
 
-    /* 正常运行时不会到达此处。*/
+    /* 正常运行不会到达此处（致命错误路径）。按初始化逆序清理全部资源。 */
     heartbeat_stop();
     epoll_worker_destroy();
     threadpool_destroy();
+    mqtt_client_destroy();
+    conn_manager_destroy();
     logger_destroy();
     config_free();
 
-    return EXIT_SUCCESS;
+    return rc == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
 }
 
 /*
