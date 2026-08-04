@@ -10,6 +10,7 @@ add_executable(iot-gateway
     business/mqtt_client.c
     utils/ringbuffer.c
     utils/task_queue.c
+    utils/fd_util.c
     utils/threadpool.c
     utils/config_parser.c
     utils/logger.c

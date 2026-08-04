@@ -2,39 +2,16 @@
 
 #include <arpa/inet.h>
 #include <errno.h>
-#include <fcntl.h>
 #include <netinet/in.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <unistd.h>
 
+#include "utils/fd_util.h"
 #include "utils/logger.h"
 
 #define SERVER_LISTEN_BACKLOG 128
-
-/**
- * @brief 将文件描述符设置为非阻塞模式。
- *
- * @param fd 待修改的文件描述符。
- *
- * @return 成功返回 0，失败返回 -1 并设置 errno。
- */
-static int set_nonblocking(int fd)
-{
-    int flags;
-
-    flags = fcntl(fd, F_GETFL, 0);
-    if (flags == -1) {
-        return -1;
-    }
-
-    if (fcntl(fd, F_SETFL, flags | O_NONBLOCK) == -1) {
-        return -1;
-    }
-
-    return 0;
-}
 
 int server_init(uint16_t port)
 {
@@ -70,8 +47,8 @@ int server_init(uint16_t port)
         return -1;
     }
 
-    if (set_nonblocking(listen_fd) == -1) {
-        LOG_ERROR("server_init: set_nonblocking failed: %s",
+    if (fd_set_nonblocking(listen_fd) == -1) {
+        LOG_ERROR("server_init: fd_set_nonblocking failed: %s",
               strerror(errno));
         close(listen_fd);
         return -1;
@@ -121,8 +98,8 @@ int server_accept(int listen_fd)
         break;
     }
 
-    if (set_nonblocking(client_fd) == -1) {
-        LOG_ERROR("server_accept: set_nonblocking failed: %s",
+    if (fd_set_nonblocking(client_fd) == -1) {
+        LOG_ERROR("server_accept: fd_set_nonblocking failed: %s",
               strerror(errno));
         close(client_fd);
         return -1;

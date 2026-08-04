@@ -1,7 +1,6 @@
 #include "gateway/epoll_worker.h"
 
 #include <errno.h>
-#include <fcntl.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -11,6 +10,7 @@
 #include <unistd.h>
 
 #include "gateway/conn_manager.h"
+#include "utils/fd_util.h"
 #include "utils/logger.h"
 #include "utils/threadpool.h"
 #include "protocol/packet_parser.h"
@@ -118,30 +118,6 @@ struct pipe_msg {
     uint8_t  data[PROTOCOL_MAX_FRAME_SIZE];
 };
 
-/**
- * @brief 将文件描述符设置为非阻塞模式。
- *
- * server.c 中已有重复的辅助函数；保留在此处以保持模块自包含，
- * 后续可移到共享工具模块。
- *
- * @param fd 待修改的文件描述符。
- * @return 成功返回 0，失败返回 -1 并设置 errno。
- */
-static int set_nonblocking(int fd)
-{
-    int flags;
-
-    flags = fcntl(fd, F_GETFL, 0);
-    if (flags == -1) {
-        return -1;
-    }
-
-    if (fcntl(fd, F_SETFL, flags | O_NONBLOCK) == -1) {
-        return -1;
-    }
-
-    return 0;
-}
 /* =========================================================================
  * Connection list helpers (epoll thread only, no lock needed)
  * ========================================================================= */
@@ -190,9 +166,9 @@ int epoll_worker_init(void)
         return -1;
     }
 
-    if (set_nonblocking(g_close_pipe[0]) == -1 ||
-        set_nonblocking(g_close_pipe[1]) == -1) {
-        LOG_ERROR("epoll_worker_init: set_nonblocking failed: %s",
+    if (fd_set_nonblocking(g_close_pipe[0]) == -1 ||
+        fd_set_nonblocking(g_close_pipe[1]) == -1) {
+        LOG_ERROR("epoll_worker_init: fd_set_nonblocking failed: %s",
                   strerror(errno));
         close(g_close_pipe[0]);
         close(g_close_pipe[1]);
@@ -408,8 +384,8 @@ static void handle_listen(int epoll_fd, int listen_fd)
 
         /*
          * server_accept() 已设置socket 为非阻塞，但防御性地再检查一次         * 以应对实现可能变化的情况。         */
-        if (set_nonblocking(client_fd) == -1) {
-            LOG_ERROR("handle_listen: set_nonblocking failed, closing fd=%d",
+        if (fd_set_nonblocking(client_fd) == -1) {
+            LOG_ERROR("handle_listen: fd_set_nonblocking failed, closing fd=%d",
                       client_fd);
             connection_close(epoll_fd, conn);
             continue;
