@@ -1,0 +1,39 @@
+# ---- Build artifacts ----
+/build/
+/build-*/
+/cmake-build-*/
+
+# ---- Runtime artifacts ----
+/logs/
+*.log
+
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# ---- Editor / OS ----
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# ---- 编译中间产物 ----
+*.o
+*.a
+*.so
+
+# ---- CMake / 工具生成 ----
+compile_commands.json
+Testing/
+.cache/
+
+# ---- 抓包文件 ----
+*.pcap
+
+# ---- AI 工具链（移出跟踪）----
+.agents/
+.specify/
+.codex/
