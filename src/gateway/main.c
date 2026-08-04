@@ -138,10 +138,12 @@ int main(int argc, char *argv[])
 
     if (heartbeat_start() != 0) {
         LOG_ERROR("failed to start heartbeat monitor");
-        mqtt_client_destroy();
+        /* 按初始化逆序清理：先停工作线程（可能正在调用 mqtt_publish），
+         * 再销毁 MQTT 客户端，避免并发访问已销毁的单例。 */
         heartbeat_stop();
         epoll_worker_destroy();
         threadpool_destroy();
+        mqtt_client_destroy();
         logger_destroy();
         config_free();
         return EXIT_FAILURE;
@@ -150,10 +152,12 @@ int main(int argc, char *argv[])
     listen_fd = server_init((uint16_t)server_port);
     if (listen_fd < 0) {
         LOG_ERROR("failed to initialize server on port %d", server_port);
-        mqtt_client_destroy();
+        /* 心跳线程已运行：先停心跳，再停工作线程，最后销毁 MQTT 客户端
+         * （工作线程可能正在调用 mqtt_publish）。 */
         heartbeat_stop();
         epoll_worker_destroy();
         threadpool_destroy();
+        mqtt_client_destroy();
         logger_destroy();
         config_free();
         return EXIT_FAILURE;
