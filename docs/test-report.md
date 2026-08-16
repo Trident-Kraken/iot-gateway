@@ -93,6 +93,22 @@ ERROR SUMMARY: 0 errors from 0 contexts
 | 30 分钟 soak（`run_soak.sh 30`） | ✅ 实测：20 设备 × 2Hz 持续 30 分钟；RSS 6192→6316 kB（+124 kB，阈值 8192），网关全程存活，min/max=6312/6316 kB |
 | 1 分钟 soak 冒烟（实测） | ✅ RSS 6200→6320 kB（+120 kB，阈值 8192），网关全程存活 |
 
+### 结构化结果（PASS 汇总）
+
+**100 connections / 60s stress regression**
+
+- Baseline: 991 QPS
+- Result: 990.2 QPS
+- Status: PASS
+
+**30-minute soak**
+
+- Initial RSS: 6192 kB
+- Final RSS: 6316 kB
+- Delta: +124 kB
+- Process survival: PASS
+- Status: PASS
+
 # Conclusion
 
 - **核心链路（P0）全部通过**：协议解析正确性（单测 56 断言）、数据收发全链路（E2E）、错误处理（配置 fail-fast、心跳超时、断连清理、离线缓存、故障注入）。
