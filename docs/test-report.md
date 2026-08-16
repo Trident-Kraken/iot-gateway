@@ -90,14 +90,14 @@ ERROR SUMMARY: 0 errors from 0 contexts
 | 项 | 结果 |
 |---|---|
 | 100 连接压测回归（`stress_test.py -c 100 -f 10 -d 60`） | ✅ 实测：Effective QPS **990.2**（历史 991.1，无回退）；59,500 帧 / 0 发送错误 / 0.00% 错误率；100/100 连接成功；延迟 avg 0.137ms、P50 0.117ms、P99 0.509ms、max 23.108ms |
-| 30 分钟 soak（`run_soak.sh 30`） | ⏳ 待运行 |
+| 30 分钟 soak（`run_soak.sh 30`） | ✅ 实测：20 设备 × 2Hz 持续 30 分钟；RSS 6192→6316 kB（+124 kB，阈值 8192），网关全程存活，min/max=6312/6316 kB |
 | 1 分钟 soak 冒烟（实测） | ✅ RSS 6200→6320 kB（+120 kB，阈值 8192），网关全程存活 |
 
 # Conclusion
 
 - **核心链路（P0）全部通过**：协议解析正确性（单测 56 断言）、数据收发全链路（E2E）、错误处理（配置 fail-fast、心跳超时、断连清理、离线缓存、故障注入）。
 - **内存可靠性**：单测 valgrind 0 泄漏 0 错误；soak 冒烟 RSS 稳定。
-- **待运行**：30 分钟 soak、CI（GitHub Actions）结果确认。
+- **待确认**：CI（GitHub Actions）结果（本地 12/12 已全绿）。
 - **本轮额外修复**：`device_simulator.py` length_overflow 缺陷（无参 builder 使线程崩溃；长度 300→2048 对齐协议 1024 上限）。
 
 ## 复现命令
