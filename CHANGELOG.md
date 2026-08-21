@@ -5,6 +5,14 @@
 
 ## [Unreleased]
 
+### 修复（Day4 代码审查 — P0）
+
+- `fix(epoll)`: 修复 epoll 事件批内陈旧事件导致连接对象池节点双重释放的 P0 缺陷。epoll_wait 返回的 events[] 是快照，同批内先处理的 pipe 消息（心跳超时关闭）可能已释放某连接槽位，而该连接的陈旧 EPOLLIN/EPOLLHUP 事件仍留在批内后续位置，二次 `connection_close()` 会使对象池空闲链自环，后续所有新连接共享同一上下文（池整体腐坏）。修复方案：
+  1. `struct connection` 增加 `closed` 标志，`connection_close()` 首次进入即置位，重入直接返回；
+  2. 事件分发循环中跳过 `closed=1` 的客户端连接（陈旧事件防护）；
+  3. 关闭的连接槽挂入 `g_conn_trash` 链，批末由 `conn_pool_flush_trash()` 统一归还空闲链，保证批内槽位不被 accept 复用（陈旧事件即使到达也只能看到 `closed=1` 被跳过，不会误伤复用该槽位的新连接）。
+- `test(integration)`: 新增 `test_stale_event_race.py` 竞态回归用例（端口 8083）：10 轮「连接→短暂活跃→心跳超时边界突发数据→立即断连」churn，每轮以 CMD_CONFIG 下行回显验证连接池/连接链表完整性，末尾双连接并发回显断言无对象池自环。
+
 ### 修复（Day2 代码审查）
 
 - `fix(protocol)`: RingBuffer 满则拒绝写入，修复解析器背压检查形同虚设导致的静默丢帧（AGENTS §5.3）。

@@ -44,6 +44,10 @@ struct connection {
     int       fd;
     uint64_t  generation; /* 连接代际号：accept 时递增分配，fd 复用后用于区分。 */
     enum conn_role role;  /* 该 fd 在事件循环中的角色。 */
+    /* 本事件批内是否已被 connection_close() 关闭（陈旧事件重入防护，
+     * 见 connection_close 与事件分发处的面试点注释）。对象池 acquire
+     * 时的 memset 会把它清零，新连接天然为“未关闭”。 */
+    int       closed;
     struct connection *next; /* singly-linked list of client connections */
 };
 
@@ -58,6 +62,13 @@ static uint64_t g_generation = 0;
  * 符合 AGENTS §2.3「只实现项目够用的连接池」。 */
 static struct connection g_conn_pool[CONN_POOL_CAPACITY];
 static struct connection *g_conn_free = NULL;
+
+/* 本 epoll_wait 批次内已关闭、待批末归还的连接槽（LIFO，仅 epoll 线程访问）。
+ * 为什么不立即归还空闲链：events[] 是 epoll_wait 返回时刻的快照，同批内
+ * 可能残留“已被 pipe 消息关闭的连接”的陈旧事件；若立即归还，槽位会被
+ * 同批 accept 复用，陈旧事件将误伤新连接。批末统一归还保证批内槽位
+ * 绝不复用，配合 closed 标志可安全跳过陈旧事件。 */
+static struct connection *g_conn_trash = NULL;
 
 static void conn_pool_init(void)
 {
@@ -97,6 +108,20 @@ static void conn_pool_release(struct connection *conn)
 
     conn->next = g_conn_free;
     g_conn_free = conn;
+}
+
+/*
+ * 批末回收：把本事件批内关闭的连接槽从 trash 链统一归还空闲链。
+ * 由事件循环在处理完一批 events[] 的全部事件后调用（仅 epoll 线程），
+ * 保证关闭槽位在批内绝不被 accept 复用（见 g_conn_trash 注释）。
+ */
+static void conn_pool_flush_trash(void)
+{
+    while (g_conn_trash != NULL) {
+        struct connection *conn = g_conn_trash;
+        g_conn_trash = conn->next;
+        conn_pool_release(conn);
+    }
 }
 
 /* self-pipe 消息类型。 */
@@ -286,14 +311,28 @@ static int epoll_add(int epoll_fd, int fd, struct connection *conn)
 /**
  * @brief 从 epoll 实例移除一个文件描述符并关闭它。
  *
+ * 面试点注释（陈旧事件与双重释放防护）：
+ *   epoll_wait 返回的 events[] 是调用时刻的快照。同一批次内，先处理的
+ *   pipe 消息（如心跳超时关闭）可能已把某连接关闭，而该连接的
+ *   EPOLLIN/EPOLLHUP 事件仍留在批内后续位置。若对此类“陈旧事件”再次
+ *   执行本函数，旧实现会把同一对象池节点归还空闲链两次，空闲链自环，
+ *   之后所有新连接共享同一连接上下文（池整体腐坏）。防护分两层：
+ *     1. closed 标志：首次进入即置位，重入直接返回；
+ *     2. 批末延迟归还：节点挂入 trash 链而非空闲链，批内槽位不可能被
+ *        accept 复用，陈旧事件即使到达也只能看到 closed=1 被跳过，
+ *        不会误伤复用该槽位的新连接。
+ *
  * @param epoll_fd epoll 实例。
  * @param conn     待清理的连接上下文。
  */
 static void connection_close(int epoll_fd, struct connection *conn)
 {
-    if (conn == NULL) {
+    if (conn == NULL || conn->closed) {
+        /* conn == NULL 防御；closed 表示同批内已关闭（陈旧事件重入）。 */
         return;
     }
+
+    conn->closed = 1;
 
     /* Remove from the client connection list. */
     conn_list_remove(conn);
@@ -317,7 +356,14 @@ static void connection_close(int epoll_fd, struct connection *conn)
     }
 
     close(conn->fd);
-    conn_pool_release(conn);
+
+    /* 挂入 trash 链，待本批事件处理完毕后再归还空闲链（见函数头注释）。
+     * 仅客户端连接来自对象池；listen/pipe 上下文为独立 calloc，
+     * 由 epoll_worker_run 退出路径释放，不得进入池。 */
+    if (conn->role == CONN_ROLE_CLIENT) {
+        conn->next = g_conn_trash;
+        g_conn_trash = conn;
+    }
 }
 
 /**
@@ -595,6 +641,17 @@ int epoll_worker_run(int listen_fd)
                 continue;
             }
 
+            /*
+             * 面试点注释（陈旧事件防护）：
+             * events[] 是 epoll_wait 时刻的快照，本批更早处理的 pipe
+             * 消息可能已关闭该连接（closed=1，槽位在 trash 链待批末回收）。
+             * 直接跳过，防止对已关闭连接二次 recv/close；由于槽位批内
+             * 不会被 accept 复用，closed=1 一定属于“旧连接”而非新连接。
+             */
+            if (conn->role == CONN_ROLE_CLIENT && conn->closed) {
+                continue;
+            }
+
             ev = events[i].events;
 
             /* 错误/挂起事件也意味着应该关闭连接（仅客户端连接）。 */
@@ -615,6 +672,10 @@ int epoll_worker_run(int listen_fd)
                 }
             }
         }
+
+        /* 本批事件全部处理完毕，统一归还批内关闭的连接槽（见
+         * connection_close 处面试点注释）。此后槽位才允许被 accept 复用。 */
+        conn_pool_flush_trash();
     }
 
     /*

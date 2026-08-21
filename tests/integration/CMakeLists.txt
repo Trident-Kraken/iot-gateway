@@ -63,3 +63,12 @@ add_test(
 )
 set_tests_properties(integration_fault_injection
                      PROPERTIES TIMEOUT 120 SKIP_RETURN_CODE 77)
+
+# 超时关闭竞态 churn（Day4 P0 修复回归）：心跳超时边界突发数据/断连，
+# 每轮以 CMD_CONFIG 下行回显验证连接池/连接链表完整性（端口 8083）。
+add_test(
+    NAME integration_stale_event_race
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_stale_event_race.py
+)
+set_tests_properties(integration_stale_event_race
+                     PROPERTIES TIMEOUT 90 SKIP_RETURN_CODE 77)

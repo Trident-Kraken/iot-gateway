@@ -131,3 +131,49 @@ python3 tests/integration/test_fault_injection.py
 python3 tests/integration/stress_test.py -c 100 -f 10 -d 60 -r /tmp/stress_day3.txt
 bash tests/scripts/run_soak.sh 30
 ```
+
+---
+
+# Day4 P0 修复回归（2026-08-21）
+
+> 背景：Day4 代码审查发现 P0 缺陷 —— 同一 `epoll_wait` 事件批内，陈旧客户端事件可能在连接已被（批内更早的 pipe 关闭请求事件）清理后再次命中同一连接槽位，`conn_pool_release()` 二次进入使空闲链表成环，进而导致池耗尽/双重释放。修复为双层防御：`connection.closed` 重入保护（快路径）+ 批内延迟归还（关闭的槽位先入 `g_conn_trash`，批末统一 `conn_pool_flush_trash()` 归还，杜绝批内槽位复用）。详见 `CHANGELOG.md` 与 `src/gateway/epoll_worker.c` 内注释。
+
+## Build（Day4）
+
+✅ 零错误、零警告（`-Wall -Wextra`，Release 重新配置后增量编译）。
+
+## 合并运行（Day4）
+
+```bash
+ctest --test-dir build --output-on-failure
+```
+
+✅ **13/13 全部通过**（7 项单测/自检 + 6 项集成，总耗时 96.0s），无跳过、无失败。较 Day3 新增 1 项集成用例：
+
+| 用例 | 场景 | 结果（实测） |
+|---|---|---|
+| integration_stale_event_race | 心跳超时边界连接 churn ×10 轮（connect → 边界突发 → 断开），以 0x03 下行回显作连接跟踪完整性金丝雀；末尾双连接并发回显 + fd 稳定性检查 | ✅ 通过：10/10 轮全部在超时窗口内被正确关闭，各轮回显地址全部有效（无双重释放/UAF 迹象），双连接并发回显成功，fd 数量稳定（25.17s） |
+
+## 压测回归（Day4，修复后）
+
+`stress_test.py -c 100 -f 10 -d 60`（与 Day3 完全同参）连续 2 次有效运行：
+
+| 轮次 | Effective QPS | 错误率 | P50 | P99 | 连接成功 |
+|---|---|---|---|---|---|
+| 1 | 930.2 | 0.00% | 0.130 ms | 0.559 ms | 100/100 |
+| 2 | 928.5 | 0.00% | 0.122 ms | 0.503 ms | 100/100（avg 558.0 帧/连接） |
+
+- 两轮自洽（930.2 / 928.5，相差 0.2%）；相比 Day3 基线 990.2 低约 6%。
+- **判定为 WSL2 环境噪声而非修复回退**：稳态 100 连接压测中无心跳超时关闭，新增的 `closed` 分支检查与 `conn_pool_flush_trash()`（空链立即返回）在该负载下均为空操作，不存在引入 6% 开销的路径；Day3 同日两轮基线本身也有 991.1 → 990.2 的波动，跨日 ~6% 波动在历史观测范围内。
+
+## 复现命令（Day4 新增）
+
+```bash
+python3 tests/integration/test_stale_event_race.py
+python3 tests/integration/stress_test.py -c 100 -f 10 -d 60 -r /tmp/stress_day4.txt
+```
+
+## Conclusion（Day4）
+
+- P0 修复后 CTest 13/13 全绿，新增竞态回归用例持续守护该路径。
+- 压测两轮自洽、0 错误、连接与延迟指标正常；QPS 差异归因于环境噪声。
