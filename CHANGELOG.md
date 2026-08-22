@@ -5,6 +5,14 @@
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-08-23
+
+首个正式版本。核心链路（TCP 接入 → 状态机拆包 → 线程池分发 → MQTT 上报/下行）功能完整；经 Day3 测试体系（14 项 CTest、ASan/TSan、压测、soak）与 Day4 工程级代码审查（P0×1 + P1×3 全部修复并带区分度回归用例）验证。
+
+- 性能：100 连接 × 10fps 压测 988.3 QPS（历史基线 991.1，无回退），P99 0.42ms，0 错误。
+- 稳定性：30 分钟 soak ~7.2 万帧 RSS +124kB（阈值 8192kB）；SIGTERM 优雅停机全链路清理 exit 0。
+- 质量门槛：Release/ASan/TSan 三构建 CTest 14/14 全绿；GitHub Actions CI。
+
 ### 修复（Day4 代码审查 — P1：F2/F3/F4）
 
 - `fix(server)`: **F2** — `server_accept` 对 `ECONNABORTED`/`EPROTO` 由"记日志退出"改为继续 accept（瞬时错误：该连接已被对端放弃，内核已移出队列，后方可能还有待处理连接；ET 模式下提前跳出会使剩余 backlog 连接饿死）；`EMFILE`/`ENFILE` 时通过 reserve fd（启动时预开的 `/dev/null`）排空并拒绝积压连接——否则 backlog 不清空、监听 fd 在 ET 模式下永不再触发事件，新设备全部无声挂起。新增 `test_fd_exhaustion.py`（低 ulimit 网关 + 120 连接风暴，端口 8084）：断言耗尽期间网关存活、新连接被**及时拒绝**而非无声挂起、释放后完全恢复；已在未修复二进制上验证该测试确实失败（区分度确认）。
