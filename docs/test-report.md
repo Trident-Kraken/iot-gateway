@@ -196,6 +196,7 @@ python3 tests/integration/stress_test.py -c 100 -f 10 -d 60 -r /tmp/stress_day4.
 | ASan（含 LeakSanitizer，`log_path` 落盘检查） | ✅ **14/14 通过**（99.8s） | 零报告文件 |
 | TSan（`log_path` 落盘检查） | ✅ **14/14 通过**（99.2s） | 零数据竞争 |
 | 1 分钟 soak（churn 后 RSS 稳定性） | ✅ PASS：RSS 6132→6252 kB（+120 kB，阈值 8192），全程存活 | — |
+| 100 连接压测回归（P1 修复后二进制） | ✅ **988.3 QPS** / 59,393 帧 / 0.00% 错误 / P99 0.415 ms | 与 Day3 基线 990.2 持平；同日复测证实 P0 阶段 930 低值确为 WSL2 环境噪声，非修复回退 |
 
 较 P0 阶段净增 1 项集成用例（13→14）：
 
