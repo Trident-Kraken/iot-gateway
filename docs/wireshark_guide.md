@@ -1,6 +1,6 @@
 # Wireshark 抓包验证指南 — iot-gateway
 
-> 适用环境：WSL2 + Ubuntu 22.04，iot-gateway 端口 **8080**，MQTT Broker 端口 **1883**
+> 适用环境：WSL2 + Ubuntu 24.04，iot-gateway 端口 **8080**，MQTT Broker 端口 **1883**
 
 ---
 

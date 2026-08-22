@@ -49,7 +49,9 @@ cmake --build build
 | `[mqtt]` | `mqtt_port` | 1883 | Broker 端口 |
 | `[mqtt]` | `mqtt_qos` | 0 | 发布 QoS（0/1/2；QoS1/2 确认与重传由 `mosquitto_loop` 处理） |
 
-## 4. 启动
+> 配置语法：支持整行 `#`/`;` 注释与**行内注释**（值中首个 `#` 或 `;` 起视为注释；值本身含这两个字符时不能写行内注释）。整数值非法（非数字/空值/超范围）时回退默认值并在日志中记 `ERROR` 告警；`server_port`/`thread_pool_size`/`mqtt_port`/`mqtt_qos` 超出合法范围则拒绝启动（fail-fast）。
+
+## 4. 启动与停止
 
 ```bash
 # 1. 启动 Mosquitto Broker
@@ -63,6 +65,14 @@ ss -tlnp | grep 8080
 ```
 
 日志写入 `logs/gateway.log`（格式 `[YYYY-MM-DD HH:MM:SS] [LEVEL] [file:line] message`，支持轮转）。
+
+### 停止（优雅停机）
+
+```bash
+kill -TERM <pid>    # 或 Ctrl+C（SIGINT）
+```
+
+网关收到 `SIGTERM`/`SIGINT` 后执行优雅停机：关闭全部客户端连接 → 停心跳线程 → 排空并停止工作线程 → 断开 MQTT（释放离线缓存残留）→ 释放其余资源 → **exit 0**。正常情况下 1 秒内完成。仅 `SIGKILL` 会跳过清理直接终止（离线缓存与 inflight 消息丢失）。
 
 ## 5. 端到端验证
 
