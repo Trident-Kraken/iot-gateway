@@ -80,7 +80,9 @@ POSIX 允许 `pthread_cond_wait` 发生虚假唤醒（spurious wakeup）——�
 
 为什么不让心跳线程直接关？因为 `close(fd)` 会与 epoll 线程的 I/O 操作产生竞争——如果心跳线程关了 fd，epoll 线程恰好在 `recv` 同一个 fd，就会读到错误数据或触发 `EBADF`。self-pipe 机制把关闭操作串行化到 epoll 线程的事件循环中：心跳线程只负责"发现超时"，epoll 线程负责"执行清理"，两者职责分离，无竞争。
 
-资源回收链路（全部在 epoll 线程执行）：`epoll_worker_request_close(fd)`（心跳线程，写 self-pipe）→ epoll 线程读 self-pipe → `connection_close()`: `epoll_ctl(DEL)` → `packet_parser_unregister`（释放 parse_ctx + RingBuffer）→ `conn_manager_remove` → `close(fd)` → `free(conn)`。
+资源回收链路（全部在 epoll 线程执行）：`epoll_worker_request_close(fd)`（心跳线程，写 self-pipe）→ epoll 线程读 self-pipe → `connection_close()`: `epoll_ctl(DEL)` → `packet_parser_unregister`（释放 parse_ctx + RingBuffer）→ `conn_manager_remove` → `close(fd)` → 归还连接对象池（固定 1024 槽位，不 free）。
+
+这里还有个容易被追问的深水点：epoll_wait 返回的事件数组是快照，同一批事件里可能既有"pipe 关闭请求"又有该连接的残留事件——如果关闭时立即把槽位归还对象池，同批的 accept 可能立刻复用它，残留事件就会误伤新连接，甚至双重归还导致空闲链自环。解法是双层防护：`closed` 标志挡住重入清理，被关闭的槽位先挂入 trash 链，**整批事件处理完**才统一归还。项目里有专门的竞态回归用例（心跳超时边界 churn）持续守护这条路径。
 
 ---
 
