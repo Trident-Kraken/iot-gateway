@@ -1,5 +1,7 @@
 # Linux Industrial IoT TCP Gateway
 
+[![CI](https://github.com/lingfeng-pang/iot-gateway/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/lingfeng-pang/iot-gateway/actions/workflows/ci.yml)
+
 基于 **epoll ET + pthread 线程池** 的 Linux 工业物联网通信网关，支持自定义二进制协议解析与 MQTT 数据上报。
 
 ## 核心特性
