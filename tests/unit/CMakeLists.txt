@@ -12,13 +12,16 @@ target_include_directories(unit_tests PRIVATE ${CMAKE_SOURCE_DIR}/include)
 
 add_test(NAME unit_tests COMMAND unit_tests)
 
-# config_parser 单元测试。
+# config_parser 单元测试（含 F4：行内注释剥离 + 非法 int 回退告警，
+# config_get_int 依赖 logger 输出告警，故一并编译 logger.c）。
 add_executable(test_config
     test_config.c
     ${CMAKE_SOURCE_DIR}/src/utils/config_parser.c
+    ${CMAKE_SOURCE_DIR}/src/utils/logger.c
 )
 
 target_include_directories(test_config PRIVATE ${CMAKE_SOURCE_DIR}/include)
+target_link_libraries(test_config PRIVATE Threads::Threads)
 
 add_test(NAME unit_config COMMAND test_config)
 

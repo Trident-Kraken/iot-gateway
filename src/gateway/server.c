@@ -1,7 +1,10 @@
+#define _POSIX_C_SOURCE 200809L /* O_CLOEXEC */
+
 #include "gateway/server.h"
 
 #include <arpa/inet.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <netinet/in.h>
 #include <string.h>
 #include <sys/socket.h>
@@ -12,6 +15,16 @@
 #include "utils/logger.h"
 
 #define SERVER_LISTEN_BACKLOG 128
+
+/*
+ * reserve fd（Day4 F2）：进程 fd 耗尽（EMFILE/ENFILE）时的"救急"描述符。
+ * accept() 失败 EMFILE 时积压连接仍留在 backlog，ET 模式只在队列
+ * 空→非空跳变时通知，backlog 不清空监听 fd 就永远等不到新事件
+ * （新设备全部无声挂起）。临时关闭 reserve fd 换取一个可用 fd，
+ * 把 backlog 全部 accept 出来并立即 close（明确拒绝），排空后
+ * 再补开 reserve fd，恢复 ET 事件边沿。
+ */
+static int g_reserve_fd = -1;
 
 int server_init(uint16_t port)
 {
@@ -60,7 +73,49 @@ int server_init(uint16_t port)
         return -1;
     }
 
+    /* 打开 reserve fd（Day4 F2）：失败仅告警——极少数环境无 /dev/null
+     * 时退化为旧的"EMFILE 即停止 accept"行为。 */
+    g_reserve_fd = open("/dev/null", O_RDONLY | O_CLOEXEC);
+    if (g_reserve_fd == -1) {
+        LOG_ERROR("server_init: reserve fd open failed: %s",
+                  strerror(errno));
+    }
+
     return listen_fd;
+}
+
+/*
+ * EMFILE/ENFILE 时的 backlog 排空拒绝（Day4 F2，见 g_reserve_fd 注释）。
+ * 释放 reserve fd → 循环 accept 并立即 close（明确拒绝，客户端马上感知
+ * 连接被关闭而非无声挂起）→ 排空后补开 reserve fd。
+ */
+static void server_drain_backlog_reject(int listen_fd)
+{
+    int fd;
+    int drained = 0;
+
+    close(g_reserve_fd);
+    g_reserve_fd = -1;
+
+    for (;;) {
+        fd = accept(listen_fd, NULL, NULL);
+        if (fd == -1) {
+            break; /* EAGAIN：backlog 已排空 */
+        }
+        close(fd); /* 无 fd 可分配：立即拒绝该连接。 */
+        drained++;
+    }
+
+    if (drained > 0) {
+        LOG_ERROR("server_accept: fd exhausted, rejected %d pending "
+                  "connection(s) to unblock the listen backlog", drained);
+    }
+
+    g_reserve_fd = open("/dev/null", O_RDONLY | O_CLOEXEC);
+    if (g_reserve_fd == -1) {
+        LOG_ERROR("server_accept: reserve fd reopen failed: %s",
+                  strerror(errno));
+    }
 }
 
 int server_accept(int listen_fd)
@@ -86,8 +141,34 @@ int server_accept(int listen_fd)
                 continue;
             }
 
+            if (errno == ECONNABORTED || errno == EPROTO) {
+                /*
+                 * 瞬时错误（Day4 F2）：该连接在 accept 前已被对端放弃，
+                 * 内核已把它移出队列，队列后方可能还有待处理连接。
+                 * 必须继续 accept 而不是跳出：ET 模式下若 backlog
+                 * 未排空，监听 fd 不会再触发新事件，剩余连接会被饿死。
+                 */
+                continue;
+            }
+
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
                 /* 非阻塞模式下没有待处理的连接。 */
+                return -1;
+            }
+
+            if (errno == EMFILE || errno == ENFILE) {
+                /*
+                 * fd 耗尽（Day4 F2）：排空并拒绝积压连接，防止监听 fd
+                 * 在 ET 模式下被永久饿死。排空后恢复 errno，由调用方
+                 * 结束本轮 accept 循环。
+                 */
+                int cause = errno;
+                if (g_reserve_fd >= 0) {
+                    server_drain_backlog_reject(listen_fd);
+                }
+                errno = cause;
+                LOG_ERROR("server_accept: accept failed: %s",
+                          strerror(errno));
                 return -1;
             }
 

@@ -177,3 +177,53 @@ python3 tests/integration/stress_test.py -c 100 -f 10 -d 60 -r /tmp/stress_day4.
 
 - P0 修复后 CTest 13/13 全绿，新增竞态回归用例持续守护该路径。
 - 压测两轮自洽、0 错误、连接与延迟指标正常；QPS 差异归因于环境噪声。
+
+---
+
+# Day4 P1 修复验证（F2/F3/F4，2026-08-22）
+
+> 三项 P1 修复（accept 瞬时错误/EMFILE、SIGTERM 优雅停机、config 行内注释与非法 int 告警），全部实测验证，含未修复二进制上的测试区分度确认。
+
+## Build（Day4-P1）
+
+✅ 零错误、零警告（`-Wall -Wextra`，Release 全量干净重编译；顺带修复 heartbeat.c/test_config.c 两个隐性声明警告——严格 C11 特性宏）。
+
+## 合并运行与回归门槛（Day4-P1）
+
+| 构建类型 | 结果 | Sanitizer 报告 |
+|---|---|---|
+| Release | ✅ **14/14 通过**（99.3s） | — |
+| ASan（含 LeakSanitizer，`log_path` 落盘检查） | ✅ **14/14 通过**（99.8s） | 零报告文件 |
+| TSan（`log_path` 落盘检查） | ✅ **14/14 通过**（99.2s） | 零数据竞争 |
+| 1 分钟 soak（churn 后 RSS 稳定性） | ✅ PASS：RSS 6132→6252 kB（+120 kB，阈值 8192），全程存活 | — |
+
+较 P0 阶段净增 1 项集成用例（13→14）：
+
+| 用例 | 场景 | 结果（实测） |
+|---|---|---|
+| integration_fd_exhaustion | RLIMIT_NOFILE=96 网关 + 120 连接风暴 | ✅ 通过（4.0s）：耗尽期网关存活；新连接被及时拒绝（reserve-fd 排空 backlog）；全部释放后 0x03 回显恢复 |
+
+`integration_connection_lifecycle` 新增 D 节（SIGTERM 优雅退出）：✅ exit=0（含心跳/线程池/MQTT/conn_manager 逆序清理真实执行）。`unit_config` 新增行内注释/非法 int 回退 3 例：✅ 通过。
+
+## 测试区分度验证（未修复二进制实测）
+
+| 回退内容 | 结果 | 说明 |
+|---|---|---|
+| 仅回退 `server.c`（F2 修复前） | ❌ B 节失败 | fd 耗尽期间新连接**无声挂起**（backlog 不清空，ET 不再通知）——证明测试真实守护该修复 |
+| 仅回退 `main.c`（无信号处理器） | ❌ D 节失败 | SIGTERM 默认动作杀进程，exit=-15 而非优雅退出 0 |
+
+## Conclusion（Day4-P1）
+
+- F2/F3/F4 全部修复并有三重回归门槛：Release/ASan/TSan 各一轮 14/14 全绿 + soak RSS 稳定。
+- 新增测试经"未修复即失败"验证，具备真实守护能力；P2 项按审查结论维持不修改。
+
+## 复现命令（Day4-P1）
+
+```bash
+# 三种构建的全量回归
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build && ctest --test-dir build
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DCMAKE_C_FLAGS="-fsanitize=address -fno-omit-frame-pointer -g -O1" && cmake --build build && ctest --test-dir build
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DCMAKE_C_FLAGS="-fsanitize=thread -g -O1" && cmake --build build && ctest --test-dir build
+# churn soak
+bash tests/scripts/run_soak.sh 1
+```

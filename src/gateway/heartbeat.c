@@ -1,3 +1,5 @@
+#define _POSIX_C_SOURCE 200809L /* nanosleep */
+
 #include "gateway/heartbeat.h"
 
 #include <errno.h>
@@ -64,6 +66,29 @@ static void collect_stale(struct conn_entry *entry, void *arg)
 }
 
 /**
+ * @brief 可中断睡眠（Day4 F3）：分 100ms 小段轮询 g_running。
+ *
+ * 此前用 sleep(interval) 整段睡眠，heartbeat_stop() 的 pthread_join 最长
+ * 要等一个扫描间隔（默认 5s）才能返回，拖慢优雅停机。分段后停机等待
+ * 延迟降至 ~100ms。
+ */
+static void heartbeat_sleep(unsigned int seconds)
+{
+    unsigned int i;
+    unsigned int ticks = seconds * 10u;
+
+    for (i = 0; i < ticks; i++) {
+        if (!atomic_load(&g_running)) {
+            return;
+        }
+        {
+            struct timespec ts = { 0, 100 * 1000 * 1000 }; /* 100ms */
+            nanosleep(&ts, NULL);
+        }
+    }
+}
+
+/**
  * @brief 心跳检测线程的主循环。 */
 static void *heartbeat_thread(void *arg)
 {
@@ -73,7 +98,7 @@ static void *heartbeat_thread(void *arg)
         struct stale_collect_ctx ctx;
         size_t i;
 
-        sleep((unsigned int)g_interval_sec);
+        heartbeat_sleep((unsigned int)g_interval_sec);
 
         if (!atomic_load(&g_running)) {
             break;

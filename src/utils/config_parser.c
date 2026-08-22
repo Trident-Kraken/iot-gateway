@@ -9,6 +9,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "utils/logger.h"
+
 #define CONFIG_MAX_ENTRIES 64
 #define CONFIG_LINE_SIZE   256
 
@@ -112,6 +114,15 @@ int config_load(const char *path)
 
         *eq = '\0';
         key = trim(p);
+
+        /* 剥离行内注释：值部分第一个 '#' 或 ';' 起视为注释（Day4 F4）。
+         * 此前 "log_level=INFO ; prod" 会把 "INFO ; prod" 整体存为值，
+         * 下游 logger_level_from_string() 解析失败后静默落到默认级别。
+         * 限制：不支持引号转义，值本身含 '#' 或 ';' 时不能写行内注释。 */
+        value = strpbrk(eq + 1, "#;");
+        if (value != NULL) {
+            *value = '\0';
+        }
         value = trim(eq + 1);
 
         if (*key == '\0') {
@@ -177,8 +188,16 @@ int config_get_int(const char *key, int default_value)
 
     errno = 0;
     result = strtol(value, &endptr, 10);
-    if (errno != 0 || *endptr != '\0' ||
+    if (endptr == value || errno != 0 || *endptr != '\0' ||
         result < INT_MIN || result > INT_MAX) {
+        /*
+         * 非法整数回退告警（Day4 F4）：此前静默回退默认值，误配置
+         *（如 thread_pool_size=abc）毫无可观测信号。endptr == value
+         * 额外覆盖空值（"key="），strtol 对空串返回 0 会被误当合法值。
+         */
+        LOG_ERROR("config_get_int: key '%s' has non-integer value '%s', "
+                  "falling back to default %d",
+                  key, value, default_value);
         return default_value;
     }
 

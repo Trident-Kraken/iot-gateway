@@ -1,6 +1,7 @@
 #include "gateway/epoll_worker.h"
 
 #include <errno.h>
+#include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -19,9 +20,19 @@
 /* 每次 epoll_wait() 调用处理的最大事件数。*/
 #define EPOLL_MAX_EVENTS 1024
 
+/* epoll_wait 超时（毫秒，Day4 F3）：不用 -1 永久阻塞，周期性醒来轮询
+ * g_stop_requested，保证信号处理器仅置标志（不做任何其他系统调用）
+ * 也能在半个周期内触发优雅退出。 */
+#define EPOLL_POLL_TIMEOUT_MS 500
+
 /* Self-pipe for cross-thread close requests: heartbeat thread writes fds,
  * epoll thread reads them and performs full connection cleanup. */
 static int g_close_pipe[2] = { -1, -1 };
+
+/* 优雅停机请求标志（Day4 F3）：由 SIGTERM/SIGINT 处理器经
+ * epoll_worker_request_stop() 置位。volatile sig_atomic_t 是信号处理器
+ * 与普通代码共享标志的标准类型（单字读写原子，async-signal-safe）。 */
+static volatile sig_atomic_t g_stop_requested = 0;
 
 /* Singly-linked list of active client connections, for fd->conn lookup.
  * Only accessed by the epoll thread, no lock needed. */
@@ -217,6 +228,16 @@ void epoll_worker_destroy(void)
     }
 }
 
+void epoll_worker_request_stop(void)
+{
+    /*
+     * 优雅停机请求（Day4 F3）：可由信号处理器调用，因此只做一次标志
+     * 写入，不加锁、不分配、不记日志（async-signal-safe）。事件循环经
+     * epoll_wait 超时轮询读到该标志后走统一清理路径退出。
+     */
+    g_stop_requested = 1;
+}
+
 void epoll_worker_request_close(int fd, uint64_t generation)
 {
     struct pipe_msg msg;
@@ -389,6 +410,11 @@ static void handle_listen(int epoll_fd, int listen_fd)
                 break;
             }
 
+            /*
+             * 其余错误（Day4 F2）：ECONNABORTED/EPROTO 已在 server_accept
+             * 内部重试排空；EMFILE/ENFILE 已通过 reserve fd 排空拒绝。
+             * 到达这里即本轮 accept 结束，等待下一次 epoll 事件。
+             */
             LOG_ERROR("handle_listen: accept failed: %s",
                       strerror(errno));
             break;
@@ -620,7 +646,17 @@ int epoll_worker_run(int listen_fd)
     for (;;) {
         int nfds;
 
-        nfds = epoll_wait(epoll_fd, events, EPOLL_MAX_EVENTS, -1);
+        /*
+         * 优雅停机检测（Day4 F3）：epoll_wait 带超时（而非 -1 永久阻塞），
+         * 每半个秒醒来轮询一次停机标志；信号处理器只置标志、不做其他
+         * 系统调用，事件循环在此处统一响应。
+         */
+        if (g_stop_requested) {
+            break;
+        }
+
+        nfds = epoll_wait(epoll_fd, events, EPOLL_MAX_EVENTS,
+                          EPOLL_POLL_TIMEOUT_MS);
         if (nfds == -1) {
             if (errno == EINTR) {
                 /* 被信号中断，直接重试。*/
@@ -630,6 +666,11 @@ int epoll_worker_run(int listen_fd)
             LOG_ERROR("epoll_worker_run: epoll_wait failed: %s",
                       strerror(errno));
             break;
+        }
+
+        if (nfds == 0) {
+            /* 超时无事件：回到循环顶轮询停机标志。 */
+            continue;
         }
 
         for (i = 0; i < nfds; i++) {
@@ -679,12 +720,27 @@ int epoll_worker_run(int listen_fd)
     }
 
     /*
-     * 在实践中上述循环永远运行。到达此处意味着发生了致命的 epoll_wait 错误。     * 清理监听器上下文，但将客户端清理留给进程退出处理。     */
+     * 循环退出两种途径（Day4 F3）：
+     *   1. g_stop_requested（SIGTERM/SIGINT 优雅停机）→ 关闭全部存活
+     *      客户端连接，走与运行期完全相同的 connection_close 清理路径
+     *      （epoll DEL / parser 注销 / conn_manager 移除 / close），
+     *      返回 0，main() 由此进入既有逆序清理序列；
+     *   2. 致命 epoll_wait 错误 → 返回 -1。
+     */
+    if (g_stop_requested) {
+        while (g_conn_list != NULL) {
+            connection_close(epoll_fd, g_conn_list);
+        }
+        conn_pool_flush_trash();
+        LOG_INFO("epoll_worker_run: graceful shutdown, all client "
+                 "connections closed");
+    }
+
     free(listen_conn);
     free(pipe_conn); /* NULL-safe */
     close(epoll_fd);
 
-    return -1;
+    return g_stop_requested ? 0 : -1;
 }
 
 /*

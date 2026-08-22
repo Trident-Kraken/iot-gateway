@@ -5,6 +5,12 @@
 
 ## [Unreleased]
 
+### 修复（Day4 代码审查 — P1：F2/F3/F4）
+
+- `fix(server)`: **F2** — `server_accept` 对 `ECONNABORTED`/`EPROTO` 由"记日志退出"改为继续 accept（瞬时错误：该连接已被对端放弃，内核已移出队列，后方可能还有待处理连接；ET 模式下提前跳出会使剩余 backlog 连接饿死）；`EMFILE`/`ENFILE` 时通过 reserve fd（启动时预开的 `/dev/null`）排空并拒绝积压连接——否则 backlog 不清空、监听 fd 在 ET 模式下永不再触发事件，新设备全部无声挂起。新增 `test_fd_exhaustion.py`（低 ulimit 网关 + 120 连接风暴，端口 8084）：断言耗尽期间网关存活、新连接被**及时拒绝**而非无声挂起、释放后完全恢复；已在未修复二进制上验证该测试确实失败（区分度确认）。
+- `fix(shutdown)`: **F3** — SIGTERM/SIGINT 优雅停机。信号处理器仅置 `volatile sig_atomic_t` 标志（async-signal-safe），`epoll_wait` 由永久阻塞改为 500ms 超时轮询感知停机请求；退出时经统一 `connection_close()` 路径关闭全部存活客户端连接后返回 0，`main()` 既有逆序清理序列（心跳/线程池/MQTT/conn_manager/logger/config）由死代码变为真实执行路径，退出码 0。心跳线程 `sleep()` 改 100ms 分段可中断睡眠，停机 join 延迟从最长一个扫描间隔降到 ~100ms。`test_connection_lifecycle.py` 新增 D 节断言 SIGTERM 后 exit=0（未修复二进制上实测 exit=-15，区分度确认）。
+- `fix(config)`: **F4** — `config_load` 剥离行内注释（值中首个 `#`/`;` 起，此前 `log_level=INFO ; prod` 会把注释存进值导致级别解析静默失败）；`config_get_int` 非法整数回退默认值时输出 `LOG_ERROR` 告警（原静默回退，误配置无任何可观测信号），并修复空值 `"key="` 被 `strtol` 解析为 0 而非回退默认值的边界。`unit_config` 新增 3 例回归。
+
 ### 修复（Day4 代码审查 — P0）
 
 - `fix(epoll)`: 修复 epoll 事件批内陈旧事件导致连接对象池节点双重释放的 P0 缺陷。epoll_wait 返回的 events[] 是快照，同批内先处理的 pipe 消息（心跳超时关闭）可能已释放某连接槽位，而该连接的陈旧 EPOLLIN/EPOLLHUP 事件仍留在批内后续位置，二次 `connection_close()` 会使对象池空闲链自环，后续所有新连接共享同一上下文（池整体腐坏）。修复方案：

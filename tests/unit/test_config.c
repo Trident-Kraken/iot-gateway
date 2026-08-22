@@ -5,6 +5,8 @@
  * 默认值回退、非数字/溢出/超 int 范围回退、文件缺失、
  * 超容量拒绝、重载替换旧键。
  */
+#define _POSIX_C_SOURCE 200809L /* mkstemp */
+
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -148,10 +150,37 @@ static void test_reload_replaces(void)
     config_free();
 }
 
+/*
+ * F4 回归：行内注释剥离 + 非法整数回退告警（3 例）。
+ */
+static void test_inline_comments(void)
+{
+    char path[64];
+    const char *ini =
+        "server_port=8080  # inline hash comment\n"
+        "log_level=ERROR ; inline semicolon comment\n"
+        "thread_pool_size=abc # non-integer value\n"
+        "empty_val=\n";
+
+    CHECK(load_content(ini, path, sizeof(path)) == 0);
+
+    /* 例 1：'#' 行内注释剥离后整数值正确。 */
+    CHECK(config_get_int("server_port", -1) == 8080);
+    /* 例 2：';' 行内注释剥离后字符串值正确（不再是 "ERROR ; ..."）。 */
+    CHECK(strcmp(config_get_string("log_level", "def"), "ERROR") == 0);
+    /* 例 3：非法整数回退默认值，且输出告警日志（stderr 可见）。 */
+    CHECK(config_get_int("thread_pool_size", 4) == 4);
+    /* 附带：空值同样视为非法（strtol 未消费任何数字 → 不再误当 0）。 */
+    CHECK(config_get_int("empty_val", 4) == 4);
+
+    config_free();
+}
+
 int main(void)
 {
     test_valid_ini();
     test_int_edge_cases();
+    test_inline_comments();
     test_missing_file();
     test_too_many_entries();
     test_reload_replaces();

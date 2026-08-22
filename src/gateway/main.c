@@ -1,5 +1,11 @@
+#define _POSIX_C_SOURCE 200809L /* sigaction */
+
+#include <errno.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
 
 #include <stdint.h>
 
@@ -15,6 +21,42 @@
 
 #define DEFAULT_CONFIG_PATH "config/gateway.ini"
 #define DEFAULT_LOG_PATH    "logs/gateway.log"
+
+/*
+ * 收到的停机信号编号（Day4 F3）：volatile sig_atomic_t 是信号处理器与
+ * main 之间共享标志的标准写法。仅用于退出后的日志说明。
+ */
+static volatile sig_atomic_t g_signal_num = 0;
+
+/*
+ * SIGTERM/SIGINT 处理器：只做 async-signal-safe 的两件事——记录信号编号
+ * 与置位停机标志（epoll 内部 volatile sig_atomic_t 写入）。事件循环经
+ * epoll_wait 超时轮询感知后优雅退出，清理全部在正常线程上下文完成。
+ */
+static void handle_shutdown_signal(int sig)
+{
+    g_signal_num = sig;
+    epoll_worker_request_stop();
+}
+
+static int install_shutdown_handlers(void)
+{
+    struct sigaction sa;
+
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = handle_shutdown_signal;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = SA_RESTART; /* 被信号打断的阻塞系统调用自动重启 */
+
+    if (sigaction(SIGTERM, &sa, NULL) != 0 ||
+        sigaction(SIGINT, &sa, NULL) != 0) {
+        LOG_ERROR("failed to install shutdown signal handlers: %s",
+                  strerror(errno));
+        return -1;
+    }
+
+    return 0;
+}
 
 int main(int argc, char *argv[])
 {
@@ -163,10 +205,33 @@ int main(int argc, char *argv[])
 
     LOG_INFO("server listening on port %d", server_port);
 
-    /* 永久阻塞；仅当发生致命 epoll_wait 错误时返回 -1。 */
+    /*
+     * 安装停机信号处理器（Day4 F3）：必须在 epoll_worker_run() 之前，
+     * 处理器仅置标志，由事件循环超时轮询感知并优雅退出。
+     */
+    if (install_shutdown_handlers() != 0) {
+        heartbeat_stop();
+        epoll_worker_destroy();
+        threadpool_destroy();
+        mqtt_client_destroy();
+        logger_destroy();
+        config_free();
+        close(listen_fd);
+        return EXIT_FAILURE;
+    }
+
+    /* 阻塞运行：优雅停机返回 0（Day4 F3），致命 epoll 错误返回 -1。 */
     int rc = epoll_worker_run(listen_fd);
 
-    /* 正常运行不会到达此处（致命错误路径）。按初始化逆序清理全部资源。 */
+    close(listen_fd);
+
+    if (rc == 0) {
+        LOG_INFO("shutdown: %s received, exiting gracefully",
+                 g_signal_num == SIGINT ? "SIGINT" :
+                 g_signal_num == SIGTERM ? "SIGTERM" : "stop request");
+    }
+
+    /* 按初始化逆序清理全部资源（此前为不可达死代码，F3 后真实执行）。 */
     heartbeat_stop();
     epoll_worker_destroy();
     threadpool_destroy();
