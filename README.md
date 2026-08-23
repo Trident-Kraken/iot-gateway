@@ -144,8 +144,11 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DCMAKE_C_FLAGS="-fsanitize=address
 ```
 iot-gateway/
 ├── CMakeLists.txt              # 根构建脚本（C11、-Wall -Wextra、add_subdirectory）
+├── README.md                   # 本文件
+├── AGENTS.md                   # 工程/编码规范（模块职责、深水区注释约定）
 ├── CHANGELOG.md                # 版本变更记录
 ├── LICENSE                     # MIT License
+├── .github/workflows/          # CI：构建 + CTest + 端到端集成冒烟
 ├── config/gateway.ini          # 网关配置
 ├── include/                    # 公共头文件，按模块分组
 │   ├── gateway/                #   server / epoll_worker / conn_manager / heartbeat
