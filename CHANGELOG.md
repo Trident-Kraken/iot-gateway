@@ -5,6 +5,10 @@
 
 ## [Unreleased]
 
+## [1.0.1] - 2026-11-24
+
+稳定性与健壮性维护版本，完成全仓 P0/P1/P2 缺陷修复、单元测试扩充及工程文档规范化；Release / ASan / TSan 三构建 16/16 CTest 全绿。
+
 ### 修复
 
 - `fix(epoll)`: 修复 `conn_pool_acquire()` 在 1024 连接池满时误将 `g_conn_free == NULL` 判为未初始化并重新调用 `conn_pool_init()` 覆写全部活跃连接槽位的 P0 缺陷，改为独立 `g_conn_pool_initialized` 标志；调整 `handle_listen()` 先取槽再注册解析器/连接管理器；`EPOLLIN` 优先于 `EPOLLERR | EPOLLHUP` 处理避免短连接末帧丢失；`epoll_worker_run()` 致命错误退出路径同样统一清理全部活跃连接；`pipe_conn` 注册失败不再静默忽略；新增 `PIPE_BUF` 编译期断言与部分写/发送日志区分。
