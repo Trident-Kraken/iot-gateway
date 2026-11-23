@@ -59,6 +59,7 @@ static struct {
     int               connected; /* 当前连接状态（0 = 断开, 1 = 已连接）。 */
     int               stop;      /* 管理线程退出标志。 */
     pthread_t         thread;    /* MQTT 管理线程。 */
+    unsigned int      rand_seed; /* 管理线程专用的 rand_r 种子。 */
     int               initialized;
     /* 离线消息缓存：环形队列，满则淘汰最旧（broker 不可达时暂存消息）。 */
     struct {
@@ -110,43 +111,100 @@ static void mqtt_cache_enqueue_locked(const char *topic, const char *payload)
 /**
  * @brief 将离线缓存中的消息全部提交给 libmosquitto 并释放缓存。
  *
- * 仅在管理线程连接成功后调用。先持锁摘下整段缓存（指针数组），锁外逐个
- * mosquitto_publish()，避免持锁做网络 I/O（AGENTS §10：禁止持锁做 I/O）。
+ * 仅在管理线程连接成功后调用（此时 connected 仍为 0，新到达消息继续进入缓存，
+ * 保持先旧后新顺序）。持锁摘下缓存后锁外发布；若全部冲刷完成，持锁置
+ * connected=1；若中途 publish 失败，将未发送消息与新入队消息按时间顺序合并
+ * 放回缓存（超限时淘汰最旧），置 connected=0 并返回 -1 由上层重连。
  */
-static void mqtt_cache_flush(struct mosquitto *mosq)
+static int mqtt_cache_flush(struct mosquitto *mosq)
 {
     struct mqtt_cached_msg msgs[MQTT_CACHE_MAX];
     size_t count;
     size_t head;
     size_t i;
+    int round;
+
+    for (round = 0; round < 4; round++) {
+        pthread_mutex_lock(&g_mqtt.lock);
+        if (g_mqtt.stop) {
+            pthread_mutex_unlock(&g_mqtt.lock);
+            return -1;
+        }
+        count = g_mqtt.cache.count;
+        if (count == 0) {
+            g_mqtt.connected = 1;
+            pthread_mutex_unlock(&g_mqtt.lock);
+            return 0;
+        }
+        head = g_mqtt.cache.head;
+        for (i = 0; i < count; i++) {
+            msgs[i] = g_mqtt.cache.msgs[(head + i) % MQTT_CACHE_MAX];
+        }
+        g_mqtt.cache.head = 0;
+        g_mqtt.cache.count = 0;
+        pthread_mutex_unlock(&g_mqtt.lock);
+
+        LOG_INFO("mqtt: flushing %zu cached message(s) after reconnect", count);
+        for (i = 0; i < count; i++) {
+            int rc = mosquitto_publish(mosq, NULL, msgs[i].topic,
+                                       (int)strlen(msgs[i].payload),
+                                       msgs[i].payload,
+                                       g_mqtt.qos, false /* retain */);
+            if (rc != MOSQ_ERR_SUCCESS) {
+                LOG_ERROR("mqtt: flush cached msg #%zu failed: %s",
+                          i, mosquitto_strerror(rc));
+
+                pthread_mutex_lock(&g_mqtt.lock);
+                g_mqtt.connected = 0;
+                {
+                    size_t rem_old = count - i;
+                    size_t new_cnt = g_mqtt.cache.count;
+                    size_t total = rem_old + new_cnt;
+                    size_t skip = total > MQTT_CACHE_MAX
+                                  ? (total - MQTT_CACHE_MAX) : 0;
+                    struct mqtt_cached_msg newer[MQTT_CACHE_MAX];
+                    size_t j;
+
+                    for (j = 0; j < new_cnt; j++) {
+                        newer[j] = g_mqtt.cache.msgs[
+                            (g_mqtt.cache.head + j) % MQTT_CACHE_MAX];
+                    }
+                    g_mqtt.cache.head = 0;
+                    g_mqtt.cache.count = 0;
+
+                    for (j = 0; j < rem_old; j++) {
+                        struct mqtt_cached_msg m = msgs[i + j];
+                        if (skip > 0) {
+                            free(m.topic);
+                            free(m.payload);
+                            skip--;
+                        } else {
+                            g_mqtt.cache.msgs[g_mqtt.cache.count++] = m;
+                        }
+                    }
+                    for (j = 0; j < new_cnt; j++) {
+                        struct mqtt_cached_msg m = newer[j];
+                        if (skip > 0) {
+                            free(m.topic);
+                            free(m.payload);
+                            skip--;
+                        } else {
+                            g_mqtt.cache.msgs[g_mqtt.cache.count++] = m;
+                        }
+                    }
+                }
+                pthread_mutex_unlock(&g_mqtt.lock);
+                return -1;
+            }
+            free(msgs[i].topic);
+            free(msgs[i].payload);
+        }
+    }
 
     pthread_mutex_lock(&g_mqtt.lock);
-    count = g_mqtt.cache.count;
-    if (count == 0) {
-        pthread_mutex_unlock(&g_mqtt.lock);
-        return;
-    }
-    head = g_mqtt.cache.head;
-    for (i = 0; i < count; i++) {
-        msgs[i] = g_mqtt.cache.msgs[(head + i) % MQTT_CACHE_MAX];
-    }
-    g_mqtt.cache.head = 0;
-    g_mqtt.cache.count = 0;
+    g_mqtt.connected = 1;
     pthread_mutex_unlock(&g_mqtt.lock);
-
-    LOG_INFO("mqtt: flushing %zu cached message(s) after reconnect", count);
-    for (i = 0; i < count; i++) {
-        int rc = mosquitto_publish(mosq, NULL, msgs[i].topic,
-                                   (int)strlen(msgs[i].payload),
-                                   msgs[i].payload,
-                                   g_mqtt.qos, false /* retain */);
-        if (rc != MOSQ_ERR_SUCCESS) {
-            LOG_ERROR("mqtt: flush cached msg #%zu failed: %s",
-                      i, mosquitto_strerror(rc));
-        }
-        free(msgs[i].topic);
-        free(msgs[i].payload);
-    }
+    return 0;
 }
 
 /**
@@ -170,9 +228,9 @@ static void on_publish(struct mosquitto *mosq, void *userdata, int mid)
  */
 static void mqtt_backoff_sleep(void)
 {
-    /* 退避 = base(1) + rand()%3 → 1~3 秒，jitter 避免多实例同时重连。 */
+    /* 退避 = base(1) + rand_r()%3 → 1~3 秒，jitter 避免多实例同时重连。 */
     unsigned int delay_sec = MQTT_RECONNECT_BASE_DELAY_SEC
-                             + (unsigned int)(rand() % 3);
+                             + (rand_r(&g_mqtt.rand_seed) % 3u);
     unsigned int i;
 
     if (delay_sec > MQTT_RECONNECT_MAX_DELAY_SEC) {
@@ -233,13 +291,12 @@ static void *mqtt_thread(void *arg)
             rc = mosquitto_connect(mosq, g_mqtt.broker, g_mqtt.port,
                                    MQTT_KEEPALIVE_SEC);
             if (rc == MOSQ_ERR_SUCCESS) {
-                pthread_mutex_lock(&g_mqtt.lock);
-                g_mqtt.connected = 1;
-                pthread_mutex_unlock(&g_mqtt.lock);
                 LOG_INFO("mqtt: connected to %s:%d",
                          g_mqtt.broker, g_mqtt.port);
-                /* 冲刷离线缓存（锁外发布，避免持锁做网络 I/O）。 */
-                mqtt_cache_flush(mosq);
+                /* 先冲刷离线缓存（锁外发布）再切为已连接，防止断线丢消息。 */
+                if (mqtt_cache_flush(mosq) != 0) {
+                    mqtt_backoff_sleep();
+                }
                 continue;
             }
 
@@ -326,9 +383,11 @@ int mqtt_client_init(const char *broker, int port, const char *client_id,
 
     g_mqtt.qos = qos;
 
-    /* 播种随机数，保证重连 jitter 有效。 */
-    srand((unsigned int)time(NULL));
+    /* 播种管理线程专用随机数种子，保证重连 jitter 有效且不污染全局 rand 状态。 */
+    g_mqtt.rand_seed = (unsigned int)time(NULL) ^ (unsigned int)getpid();
 
+    g_mqtt.cache.head = 0;
+    g_mqtt.cache.count = 0;
     g_mqtt.connected = 0;
     g_mqtt.stop = 0;
     g_mqtt.initialized = 1;

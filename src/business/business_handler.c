@@ -33,80 +33,200 @@ static cmd_handler_t g_cmd_handlers[256];
  * ========================================================================= */
 
 /*
- * 从 JSON 字符串中提取指定 key 的值，写入 val_buf（最多 val_size 字节）。
+ * 在长度受限的内存区域 haystack[0..haystack_len) 内查找子串 needle，
+ * 不依赖 NUL 结尾，防止非 NUL 终止的原始协议 payload 越界读取。
+ */
+static const char *find_substr_len(const char *haystack, size_t haystack_len,
+                                   const char *needle, size_t needle_len)
+{
+    size_t i;
+
+    if (haystack == NULL || needle == NULL || needle_len == 0 ||
+        haystack_len < needle_len) {
+        return NULL;
+    }
+
+    for (i = 0; i <= haystack_len - needle_len; i++) {
+        if (haystack[i] == needle[0] &&
+            memcmp(haystack + i, needle, needle_len) == 0) {
+            return haystack + i;
+        }
+    }
+
+    return NULL;
+}
+
+/*
+ * 校验字符串是否符合 RFC 8259 JSON 数字语法：
+ *   -? (0 | [1-9][0-9]*) (\.[0-9]+)? ([eE][+-]?[0-9]+)?
+ * 拒绝 "+25"、"---"、"abc"、".5"、"01" 等非法格式，避免拼出无效 JSON。
+ */
+static int is_valid_json_number(const char *s)
+{
+    if (s == NULL || *s == '\0') {
+        return 0;
+    }
+
+    if (*s == '-') {
+        s++;
+    }
+
+    if (*s == '0') {
+        s++;
+        if (*s >= '0' && *s <= '9') {
+            return 0;
+        }
+    } else if (*s >= '1' && *s <= '9') {
+        while (*s >= '0' && *s <= '9') {
+            s++;
+        }
+    } else {
+        return 0;
+    }
+
+    if (*s == '.') {
+        s++;
+        if (*s < '0' || *s > '9') {
+            return 0;
+        }
+        while (*s >= '0' && *s <= '9') {
+            s++;
+        }
+    }
+
+    if (*s == 'e' || *s == 'E') {
+        s++;
+        if (*s == '+' || *s == '-') {
+            s++;
+        }
+        if (*s < '0' || *s > '9') {
+            return 0;
+        }
+        while (*s >= '0' && *s <= '9') {
+            s++;
+        }
+    }
+
+    return *s == '\0';
+}
+
+/* 清洗将放入 JSON 字符串字面量的文本：替换控制字符、引号与反斜杠，防 JSON 破坏。 */
+static void sanitize_json_string(char *s)
+{
+    unsigned char *p;
+
+    if (s == NULL) {
+        return;
+    }
+
+    for (p = (unsigned char *)s; *p != '\0'; p++) {
+        if (*p < 0x20u || *p == '"' || *p == '\\') {
+            *p = '_';
+        }
+    }
+}
+
+/*
+ * 从长度为 json_len 的 JSON 字节流中提取指定 key 的值，写入 val_buf（最多 val_size 字节）。
  *
- * 使用 strstr（轻量字符串查找），仅处理 "key":value 的简单场景：
- *   - 字符串值带引号：  "temp":25.5  → val_buf = "25.5"
- *   - 整数值不带引号： 同理
- *   - 仅取第一个匹配项
+ * 严格按 json_len 限界扫描，不依赖 NUL 结尾；若遇到与 key 同名的字符串 value
+ * （例如 {"device_id":"temp","temp":25.5} 中先命中 "temp" 后紧跟 ',' 而非 ':'），
+ * 会继续向后搜索直到匹配真正的 "key":value。
  *
  * 返回 0 成功，-1 未找到或格式不合法。
  */
 static int json_extract(const char *json, size_t json_len,
                         const char *key, char *val_buf, size_t val_size)
 {
-    const char *pos;
-    const char *colon;
+    const char *json_end;
+    const char *cursor;
+    const char *colon = NULL;
     const char *start;
     const char *end;
     char search_key[JSON_KEY_MAX];
+    int sk_len;
 
     if (json == NULL || key == NULL || val_buf == NULL || val_size == 0) {
         return -1;
     }
 
     /* 构造带引号的搜索串: "key" */
-    (void)snprintf(search_key, sizeof(search_key), "\"%s\"", key);
-
-    /* 1. 定位 key。 */
-    pos = strstr(json, search_key);
-    if (pos == NULL) {
+    sk_len = snprintf(search_key, sizeof(search_key), "\"%s\"", key);
+    if (sk_len < 0 || (size_t)sk_len >= sizeof(search_key)) {
         return -1;
     }
 
-    /* 2. 跳过 key，找 :。 */
-    pos += strlen(search_key);
+    json_end = json + json_len;
+    cursor = json;
 
-    /* 跳过空白 */
-    while (pos < json + json_len && (*pos == ' ' || *pos == '\t')) {
-        pos++;
+    /* 1. 迭代定位真正的 key（后面紧跟空白 + ':' 且非转义引号）。 */
+    while (cursor < json_end) {
+        const char *pos = find_substr_len(cursor, (size_t)(json_end - cursor),
+                                          search_key, (size_t)sk_len);
+        const char *p;
+
+        if (pos == NULL) {
+            return -1;
+        }
+
+        if (pos == json || pos[-1] != '\\') {
+            p = pos + sk_len;
+            while (p < json_end &&
+                   (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n')) {
+                p++;
+            }
+            if (p < json_end && *p == ':') {
+                colon = p;
+                break;
+            }
+        }
+
+        cursor = pos + 1;
     }
 
-    colon = pos;
-    if (colon >= json + json_len || *colon != ':') {
+    if (colon == NULL) {
         return -1;
     }
 
     colon++;
 
-    /* 3. 跳过空白，定位 value 起始。 */
-    while (colon < json + json_len && (*colon == ' ' || *colon == '\t')) {
+    /* 2. 跳过空白，定位 value 起始。 */
+    while (colon < json_end &&
+           (*colon == ' ' || *colon == '\t' || *colon == '\r' || *colon == '\n')) {
         colon++;
     }
 
-    if (colon >= json + json_len) {
+    if (colon >= json_end) {
         return -1;
     }
 
     if (*colon == '"') {
-        /* 字符串值: "xxx" —— 按 json_len 限界查找收尾引号，
-         * 不依赖调用方缓冲区 NUL 结尾。 */
+        /* 字符串值: "xxx" —— 按 json_len 限界并跳过转义序列查找收尾引号。 */
         colon++;
         start = colon;
         end = start;
-        while (end < json + json_len && *end != '"') {
+        while (end < json_end) {
+            if (*end == '\\') {
+                if (end + 1 >= json_end) {
+                    return -1;
+                }
+                end += 2;
+                continue;
+            }
+            if (*end == '"') {
+                break;
+            }
             end++;
         }
-        if (end >= json + json_len) {
+        if (end >= json_end) {
             return -1;
         }
     } else {
-        /* 数字或布尔值: 25.5, 60, true, false */
+        /* 数字、布尔或原始 token：读到分隔符/空白为止，由调用方校验合法性。 */
         start = colon;
         end = start;
-        while (end < json + json_len
-               && (*end == '-' || *end == '+' || *end == '.'
-                   || (*end >= '0' && *end <= '9'))) {
+        while (end < json_end && *end != ',' && *end != '}' && *end != ']' &&
+               *end != ' ' && *end != '\t' && *end != '\r' && *end != '\n') {
             end++;
         }
     }
@@ -138,19 +258,15 @@ static int json_extract(const char *json, size_t json_len,
  *   {"device_id":"dev_001","temp":25.5,"hum":60,"timestamp":1718188800}
  *
  * 处理流程：
- *   1. 将 Payload 转为 C 字符串（加 '\0' 结尾）。
- *   2. 用轻量 strstr/sscanf 提取 device_id、temp、hum、timestamp。
+ *   1. 直接在长度受限的 payload 视图上调用 json_extract() 提取字段（零动态分配）。
+ *   2. 清洗 device_id 字符串并校验 temp/hum/timestamp 为合法 JSON 数字。
  *   3. 重新打包为标准 JSON，通过 mqtt_publish() 上报。
- *
- * 注：
- *   - 当前不引入 cJSON 等第三方库，以 strstr + sscanf 完成简易解析。
- *   - Payload 中可能不含 '\0'，需手动构造临时副本保证字符串安全。
  */
 void handle_sensor_data(int fd, uint64_t generation,
                          const uint8_t *payload, size_t len)
 {
     (void)generation;
-    char *json_str;
+    const char *json = (const char *)payload;
     char device_id[JSON_VALUE_MAX]   = "unknown";
     char temp_str[JSON_VALUE_MAX]    = "0.0";
     char hum_str[JSON_VALUE_MAX]     = "0.0";
@@ -168,30 +284,34 @@ void handle_sensor_data(int fd, uint64_t generation,
         return;
     }
 
-    /* 1. 转为 C 字符串（payload 中不含 '\0'）。 */
-    json_str = malloc(len + 1);
-    if (json_str == NULL) {
-        LOG_ERROR("handle_sensor_data: malloc failed for fd=%d", fd);
-        return;
+    /* 1. 轻量级 JSON 字段提取（按 len 限界，零 malloc）。 */
+    if (json_extract(json, len, "device_id",
+                     device_id, sizeof(device_id)) != 0) {
+        snprintf(device_id, sizeof(device_id), "unknown");
+    } else {
+        sanitize_json_string(device_id);
     }
-    memcpy(json_str, payload, len);
-    json_str[len] = '\0';
 
-    /* 2. 轻量级 JSON 字段提取（不使用 cJSON）。 */
-    (void)json_extract(json_str, len, "device_id",
-                       device_id, sizeof(device_id));
-    (void)json_extract(json_str, len, "temp",
-                       temp_str, sizeof(temp_str));
-    (void)json_extract(json_str, len, "hum",
-                       hum_str, sizeof(hum_str));
-    (void)json_extract(json_str, len, "timestamp",
-                       ts_str, sizeof(ts_str));
+    if (json_extract(json, len, "temp", temp_str, sizeof(temp_str)) != 0 ||
+        !is_valid_json_number(temp_str)) {
+        snprintf(temp_str, sizeof(temp_str), "0.0");
+    }
+
+    if (json_extract(json, len, "hum", hum_str, sizeof(hum_str)) != 0 ||
+        !is_valid_json_number(hum_str)) {
+        snprintf(hum_str, sizeof(hum_str), "0.0");
+    }
+
+    if (json_extract(json, len, "timestamp", ts_str, sizeof(ts_str)) != 0 ||
+        !is_valid_json_number(ts_str)) {
+        snprintf(ts_str, sizeof(ts_str), "0");
+    }
 
     /* 高频路径（每帧一条）：用 DEBUG 避免刷屏与日志 I/O 瓶颈。 */
     LOG_DEBUG("handle_sensor_data: fd=%d device=%s temp=%s hum=%s ts=%s",
               fd, device_id, temp_str, hum_str, ts_str);
 
-    /* 3. 重新打包为标准 JSON 并上报 MQTT。 */
+    /* 2. 重新打包为标准 JSON 并上报 MQTT。 */
     mqtt_json_len = snprintf(mqtt_json, sizeof(mqtt_json),
                              "{"
                              "\"device_id\":\"%s\","
@@ -205,13 +325,10 @@ void handle_sensor_data(int fd, uint64_t generation,
 
     if (mqtt_json_len < 0 || (size_t)mqtt_json_len >= sizeof(mqtt_json)) {
         LOG_ERROR("handle_sensor_data: snprintf overflow for fd=%d", fd);
-        free(json_str);
         return;
     }
 
     (void)mqtt_publish(MQTT_TOPIC_SENSOR, mqtt_json);
-
-    free(json_str);
 }
 
 /**

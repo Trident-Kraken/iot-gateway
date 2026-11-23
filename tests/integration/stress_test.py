@@ -69,6 +69,7 @@ def crc16(data: bytes) -> int:
 
 HEADER = b'\xAA\x55'
 CMD_SENSOR_DATA = 0x01
+CMD_CONFIG = 0x03
 
 
 def build_frame(device_id: str) -> bytes:
@@ -86,6 +87,35 @@ def build_frame(device_id: str) -> bytes:
     crc_field = struct.pack('>H', crc)
 
     return HEADER + length_field + cmd_field + payload + crc_field
+
+
+def build_config_probe_frame() -> bytes:
+    """Build a CMD_CONFIG (0x03) request frame with empty payload."""
+    length_field = struct.pack('>H', 0)
+    cmd_field = bytes([CMD_CONFIG])
+    crc = crc16(length_field + cmd_field)
+    return HEADER + length_field + cmd_field + struct.pack('>H', crc)
+
+
+async def read_config_response(reader: asyncio.StreamReader) -> tuple:
+    """Read and validate one complete CMD_CONFIG response frame from reader.
+
+    Returns (cmd, payload_bytes).
+    """
+    hdr = await reader.readexactly(2)
+    if hdr != HEADER:
+        raise ValueError(f"Invalid frame header: {hdr.hex()}")
+    len_bytes = await reader.readexactly(2)
+    (plen,) = struct.unpack('>H', len_bytes)
+    cmd_bytes = await reader.readexactly(1)
+    cmd = cmd_bytes[0]
+    payload = await reader.readexactly(plen)
+    crc_bytes = await reader.readexactly(2)
+    (got_crc,) = struct.unpack('>H', crc_bytes)
+    exp_crc = crc16(len_bytes + cmd_bytes + payload)
+    if exp_crc != got_crc:
+        raise ValueError(f"CRC mismatch: exp={exp_crc:#x} got={got_crc:#x}")
+    return cmd, payload
 
 
 # ---------------------------------------------------------------------------
@@ -153,6 +183,137 @@ class GlobalMetrics:
         return latencies[idx]
 
 
+@dataclass
+class ProbeMetrics:
+    """Aggregated metrics for CMD_CONFIG (0x03) request/response RTT probe."""
+
+    total_probes: int = 0
+    successful_probes: int = 0
+    timeouts: int = 0
+    errors: int = 0
+    rtt_latencies: list = field(default_factory=list)  # list[float] in seconds
+
+    @property
+    def avg_rtt(self) -> Optional[float]:
+        if not self.rtt_latencies:
+            return None
+        return sum(self.rtt_latencies) / len(self.rtt_latencies)
+
+    @property
+    def p50_rtt(self) -> Optional[float]:
+        return self._percentile(50)
+
+    @property
+    def p99_rtt(self) -> Optional[float]:
+        return self._percentile(99)
+
+    @property
+    def min_rtt(self) -> Optional[float]:
+        return min(self.rtt_latencies) if self.rtt_latencies else None
+
+    @property
+    def max_rtt(self) -> Optional[float]:
+        return max(self.rtt_latencies) if self.rtt_latencies else None
+
+    def _percentile(self, pct: float) -> Optional[float]:
+        if not self.rtt_latencies:
+            return None
+        lat = sorted(self.rtt_latencies)
+        idx = int(len(lat) * pct / 100.0)
+        if idx >= len(lat):
+            idx = len(lat) - 1
+        return lat[idx]
+
+
+async def run_config_probe(
+    host: str,
+    port: int,
+    interval: float,
+    timeout: float,
+    stop_event: asyncio.Event,
+    probe_metrics: ProbeMetrics,
+):
+    """Periodically send CMD_CONFIG (0x03) to measure true gateway RTT under load."""
+    req_frame = build_config_probe_frame()
+
+    # Small warmup delay to let background load establish
+    try:
+        await asyncio.wait_for(stop_event.wait(), timeout=min(0.2, interval))
+        return
+    except asyncio.TimeoutError:
+        pass
+
+    reader: Optional[asyncio.StreamReader] = None
+    writer: Optional[asyncio.StreamWriter] = None
+
+    async def cleanup_conn():
+        nonlocal reader, writer
+        if writer is not None:
+            try:
+                writer.close()
+                await writer.wait_closed()
+            except OSError:
+                pass
+        reader = None
+        writer = None
+
+    while not stop_event.is_set():
+        if writer is None:
+            try:
+                reader, writer = await asyncio.wait_for(
+                    asyncio.open_connection(host, port),
+                    timeout=timeout,
+                )
+            except asyncio.TimeoutError:
+                probe_metrics.total_probes += 1
+                probe_metrics.timeouts += 1
+                try:
+                    await asyncio.wait_for(stop_event.wait(), timeout=interval)
+                    break
+                except asyncio.TimeoutError:
+                    continue
+            except Exception:
+                probe_metrics.total_probes += 1
+                probe_metrics.errors += 1
+                try:
+                    await asyncio.wait_for(stop_event.wait(), timeout=interval)
+                    break
+                except asyncio.TimeoutError:
+                    continue
+
+        probe_metrics.total_probes += 1
+        t0 = time.perf_counter()
+        try:
+            writer.write(req_frame)
+            await writer.drain()
+
+            cmd, payload = await asyncio.wait_for(
+                read_config_response(reader),
+                timeout=timeout,
+            )
+            if cmd != CMD_CONFIG:
+                probe_metrics.errors += 1
+                await cleanup_conn()
+            else:
+                elapsed = time.perf_counter() - t0
+                probe_metrics.successful_probes += 1
+                probe_metrics.rtt_latencies.append(elapsed)
+        except asyncio.TimeoutError:
+            probe_metrics.timeouts += 1
+            await cleanup_conn()
+        except Exception:
+            probe_metrics.errors += 1
+            await cleanup_conn()
+
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=interval)
+            break
+        except asyncio.TimeoutError:
+            pass
+
+    await cleanup_conn()
+
+
 # ---------------------------------------------------------------------------
 # Single connection coroutine
 # ---------------------------------------------------------------------------
@@ -173,6 +334,7 @@ async def run_connection(
 ):
     """One async TCP connection sending frames at *fps* Hz."""
     cm = ConnMetrics()
+    metrics.append(cm)
     device_id = f"stress_{conn_id:05d}"
     interval = 1.0 / fps
 
@@ -187,11 +349,9 @@ async def run_connection(
         except (OSError, asyncio.TimeoutError) as e:
             if attempt == 2:
                 cm.connect_errors += 1
-                metrics.append(cm)
                 return
             await asyncio.sleep(0.5 * (attempt + 1))
     else:
-        metrics.append(cm)
         return
 
     deadline = time.monotonic() + duration
@@ -213,9 +373,9 @@ async def run_connection(
             except OSError:
                 cm.send_errors += 1
 
-            # Rate-limiting sleep
+            # Rate-limiting sleep (same perf_counter clock base as t0)
             next_tick = t0 + interval
-            sleep_for = next_tick - time.monotonic()
+            sleep_for = next_tick - time.perf_counter()
             if sleep_for > 0:
                 await asyncio.sleep(sleep_for)
     finally:
@@ -224,7 +384,6 @@ async def run_connection(
             await writer.wait_closed()
         except OSError:
             pass
-        metrics.append(cm)
 
 
 # ---------------------------------------------------------------------------
@@ -235,6 +394,7 @@ async def run_connection(
 async def progress_reporter(
     metrics: list,
     global_metrics: GlobalMetrics,
+    probe_metrics: Optional[ProbeMetrics],
     stop_event: asyncio.Event,
     lock: asyncio.Lock,
 ):
@@ -254,11 +414,23 @@ async def progress_reporter(
 
         now = time.monotonic()
         elapsed = now - last_time
-        instant_qps = (total_sent - last_total) / elapsed if elapsed > 0 else 0
+        instant_rate = (total_sent - last_total) / elapsed if elapsed > 0 else 0
+
+        probe_info = ""
+        if probe_metrics and probe_metrics.total_probes > 0:
+            last_rtt = (
+                f"{probe_metrics.rtt_latencies[-1] * 1000:.2f}ms"
+                if probe_metrics.rtt_latencies
+                else "N/A"
+            )
+            probe_info = (
+                f"  probe={probe_metrics.successful_probes}/{probe_metrics.total_probes} "
+                f"(last_rtt={last_rtt})"
+            )
 
         print(
-            f"  [live] sent={total_sent}  errors={total_errs}  "
-            f"instant_qps={instant_qps:.1f}  elapsed={now - global_metrics.start_time:.0f}s",
+            f"  [live] sent={total_sent}  send_errors={total_errs}  "
+            f"send_rate={instant_rate:.1f}fps  elapsed={now - global_metrics.start_time:.0f}s{probe_info}",
             flush=True,
         )
         last_total = total_sent
@@ -273,10 +445,11 @@ async def progress_reporter(
 def generate_report(
     global_metrics: GlobalMetrics,
     conn_metrics: list,
+    probe_metrics: Optional[ProbeMetrics],
     args: argparse.Namespace,
     report_path: str,
 ):
-    """Generate a plain-text stress report."""
+    """Generate a plain-text stress report with explicit terminology and caliber."""
     lines = []
     sep = "=" * 60
 
@@ -291,15 +464,21 @@ def generate_report(
     lines.append(f"  Actual Duration:{global_metrics.duration:.2f}s")
     lines.append("")
 
-    lines.append("--- Throughput ---")
+    lines.append("--- 客户端发送速率 (Client Send Rate) ---")
     lines.append(f"  Total frames sent:     {global_metrics.total_sent}")
     lines.append(f"  Send errors:           {global_metrics.total_send_errors}")
     lines.append(f"  Connect failures:      {global_metrics.total_connect_errors}")
-    lines.append(f"  Effective QPS:         {global_metrics.qps:,.1f}")
-    lines.append(f"  Error rate:            {global_metrics.error_rate:.2f}%")
+    lines.append(f"  Target send rate:      {args.connections * args.fps:,.1f} frames/s")
+    lines.append(f"  Client send rate:      {global_metrics.qps:,.1f} frames/s")
+    target_total = args.connections * args.fps * args.duration
+    if target_total > 0:
+        achievement = (global_metrics.total_sent / target_total) * 100.0
+        lines.append(f"  Rate achievement:      {achievement:.1f}% (理论目标 {target_total:,.0f} 帧)")
+    lines.append(f"  发送错误率 (Send error rate): {global_metrics.error_rate:.2f}% (仅统计客户端 socket 异常)")
     lines.append("")
 
-    lines.append("--- Latency ---")
+    lines.append("--- 客户端构帧及发送耗时 (Client Frame Build & Drain Time) ---")
+    lines.append("  [口径说明: 测定区间为 Python 组包至写入本地内核发送缓冲区，非网关端到端处理延迟]")
     if global_metrics.avg_latency is not None:
         lines.append(f"  Avg latency:           {global_metrics.avg_latency * 1000:.3f} ms")
     if global_metrics.p50_latency is not None:
@@ -310,6 +489,31 @@ def generate_report(
         lines.append(f"  Min latency:           {min(global_metrics.all_latencies) * 1000:.3f} ms")
         lines.append(f"  Max latency:           {max(global_metrics.all_latencies) * 1000:.3f} ms")
     lines.append("")
+
+    if probe_metrics is not None and probe_metrics.total_probes > 0:
+        lines.append("--- 配置请求往返时延探针 (0x03 RTT Probe under Load) ---")
+        lines.append("  [口径说明: 在背景 0x01 负载下定时向网关发起 CMD_CONFIG 请求，经 epoll->parser->queue->worker->self-pipe->send 全链路返回]")
+        lines.append(f"  Total probes:          {probe_metrics.total_probes}")
+        lines.append(f"  Successful probes:     {probe_metrics.successful_probes}")
+        lines.append(f"  Timeouts:              {probe_metrics.timeouts}")
+        lines.append(f"  Errors:                {probe_metrics.errors}")
+        succ_rate = (
+            (probe_metrics.successful_probes / probe_metrics.total_probes * 100.0)
+            if probe_metrics.total_probes > 0
+            else 0.0
+        )
+        lines.append(f"  Probe success rate:    {succ_rate:.1f}%")
+        if probe_metrics.avg_rtt is not None:
+            lines.append(f"  Avg RTT:               {probe_metrics.avg_rtt * 1000:.3f} ms")
+        if probe_metrics.p50_rtt is not None:
+            lines.append(f"  P50 RTT:               {probe_metrics.p50_rtt * 1000:.3f} ms")
+        if probe_metrics.p99_rtt is not None:
+            lines.append(f"  P99 RTT:               {probe_metrics.p99_rtt * 1000:.3f} ms")
+        if probe_metrics.min_rtt is not None:
+            lines.append(f"  Min RTT:               {probe_metrics.min_rtt * 1000:.3f} ms")
+        if probe_metrics.max_rtt is not None:
+            lines.append(f"  Max RTT:               {probe_metrics.max_rtt * 1000:.3f} ms")
+        lines.append("")
 
     lines.append("--- Connections ---")
     successful_conns = sum(1 for m in conn_metrics if m.connect_errors == 0)
@@ -328,6 +532,8 @@ def generate_report(
     lines.append(f"  Connections:    {args.connections}")
     lines.append(f"  FPS per conn:   {args.fps}")
     lines.append(f"  Duration:       {args.duration}s")
+    if getattr(args, "probe_interval", 0) > 0:
+        lines.append(f"  Probe Interval: {args.probe_interval}s (timeout {args.probe_timeout}s)")
     lines.append("")
     lines.append(sep)
 
@@ -370,6 +576,14 @@ def parse_args():
         "--report", "-r", default="tests/stress_report.txt",
         help="Report output path (default: tests/stress_report.txt)",
     )
+    parser.add_argument(
+        "--probe-interval", type=float, default=1.0,
+        help="Interval between CMD_CONFIG (0x03) RTT probes in seconds (0 to disable, default: 1.0)",
+    )
+    parser.add_argument(
+        "--probe-timeout", type=float, default=2.0,
+        help="Timeout for each CMD_CONFIG RTT probe in seconds (default: 2.0)",
+    )
 
     return parser.parse_args()
 
@@ -379,15 +593,18 @@ async def main_async(args):
     progress_lock = asyncio.Lock()
     metrics: list = []
     global_metrics = GlobalMetrics()
+    probe_metrics = ProbeMetrics()
 
     print("=" * 60)
     print("  IoT Gateway Stress Test")
     print("=" * 60)
-    print(f"  Target:    {args.host}:{args.port}")
-    print(f"  Connections: {args.connections}")
-    print(f"  FPS/conn:    {args.fps}")
-    print(f"  Duration:    {args.duration}s")
-    print(f"  Total target QPS: {args.connections * args.fps:,.1f}")
+    print(f"  Target:          {args.host}:{args.port}")
+    print(f"  Connections:     {args.connections}")
+    print(f"  FPS/conn:        {args.fps}")
+    print(f"  Duration:        {args.duration}s")
+    print(f"  Target send rate:{args.connections * args.fps:,.1f} frames/s")
+    if args.probe_interval > 0:
+        print(f"  RTT Probe (0x03): every {args.probe_interval}s (timeout {args.probe_timeout}s)")
     print("=" * 60)
     print()
 
@@ -395,8 +612,22 @@ async def main_async(args):
 
     # Launch reporter
     reporter_task = asyncio.create_task(
-        progress_reporter(metrics, global_metrics, stop_event, progress_lock)
+        progress_reporter(metrics, global_metrics, probe_metrics, stop_event, progress_lock)
     )
+
+    # Launch probe task if enabled
+    probe_task = None
+    if args.probe_interval > 0:
+        probe_task = asyncio.create_task(
+            run_config_probe(
+                host=args.host,
+                port=args.port,
+                interval=args.probe_interval,
+                timeout=args.probe_timeout,
+                stop_event=stop_event,
+                probe_metrics=probe_metrics,
+            )
+        )
 
     # Launch all connections
     tasks = []
@@ -435,13 +666,19 @@ async def main_async(args):
     except asyncio.TimeoutError:
         pass
 
-    # Signal reporter to stop and wait for it
+    # Signal reporter and probe to stop
     stop_event.set()
     reporter_task.cancel()
     try:
         await reporter_task
     except asyncio.CancelledError:
         pass
+
+    if probe_task is not None:
+        try:
+            await probe_task
+        except asyncio.CancelledError:
+            pass
 
     # Ensure all connection coroutines are done (cancel any stragglers)
     for t in connection_tasks:
@@ -460,14 +697,19 @@ async def main_async(args):
         global_metrics.all_latencies.extend(m.latencies)
 
     # Print final live line
+    probe_summary = ""
+    if probe_metrics and probe_metrics.total_probes > 0:
+        rtt_p99 = f"{probe_metrics.p99_rtt * 1000:.2f}ms" if probe_metrics.p99_rtt else "N/A"
+        probe_summary = f"  probe_success={probe_metrics.successful_probes}/{probe_metrics.total_probes}  rtt_p99={rtt_p99}"
     print(
         f"  [final] sent={global_metrics.total_sent}  "
-        f"errors={global_metrics.total_send_errors}  "
-        f"qps={global_metrics.qps:,.1f}",
+        f"send_errors={global_metrics.total_send_errors}  "
+        f"send_rate={global_metrics.qps:,.1f}fps"
+        f"{probe_summary}",
         flush=True,
     )
 
-    generate_report(global_metrics, metrics, args, args.report)
+    generate_report(global_metrics, metrics, probe_metrics, args, args.report)
 
 
 def main():
@@ -480,3 +722,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

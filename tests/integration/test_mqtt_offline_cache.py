@@ -136,15 +136,16 @@ def main() -> int:
             print("[FAIL] broker 未就绪")
             return 1
 
-        out_file = "/tmp/iotgw_cache_msgs.txt"
-        sub = subprocess.Popen(
-            ["mosquitto_sub", "-h", HOST, "-p", str(MQTT_PORT),
-             "-t", TOPIC, "-C", str(EXPECTED), "-W", "30"],
-            stdout=open(out_file, "w"), stderr=subprocess.DEVNULL)
+        out_file = os.path.join(tmp, "mqtt_cache_msgs.txt")
+        with open(out_file, "w") as sub_out:
+            sub = subprocess.Popen(
+                ["mosquitto_sub", "-h", HOST, "-p", str(MQTT_PORT),
+                 "-t", TOPIC, "-C", str(EXPECTED), "-W", "30"],
+                stdout=sub_out, stderr=subprocess.DEVNULL)
 
-        # 等待订阅建立 + 网关退避重连（1~3s）与冲刷。
-        time.sleep(2)
-        sub.wait(timeout=35)
+            # 等待订阅建立 + 网关退避重连（1~3s）与冲刷。
+            time.sleep(2)
+            sub.wait(timeout=35)
         try:
             with open(out_file) as f:
                 count = sum(1 for _ in f)

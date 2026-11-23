@@ -122,7 +122,9 @@ Hex Dump 中每条帧格式：
 - 用 Python 快速验算一笔：
 
 ```python
-from tests.device_simulator import crc16, build_normal_frame
+import sys
+sys.path.insert(0, "tests/integration")
+from device_simulator import crc16, build_normal_frame
 
 frame = build_normal_frame("dev_test", 25.5, 60, 1718188800)
 print(frame.hex(' '))        # 打印十六进制

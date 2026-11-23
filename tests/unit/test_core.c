@@ -105,6 +105,11 @@ static void test_packet_encode_verify(void)
     CHECK(packet_checksum_verify(frame, total) == 0);
     frame[5] ^= 0xFF;
 
+    /* CRC 空指针防御 -> EINVAL。 */
+    errno = 0;
+    CHECK(packet_checksum_verify(NULL, 10) == -1);
+    CHECK(errno == EINVAL);
+
     /* 输出缓冲区过小 -> ENOSPC。 */
     {
         struct packet *pkt = malloc(sizeof(*pkt) + 5);
@@ -115,6 +120,18 @@ static void test_packet_encode_verify(void)
         errno = 0;
         CHECK(packet_encode(pkt, small, sizeof(small)) == -1);
         CHECK(errno == ENOSPC);
+        free(pkt);
+    }
+
+    /* payload_len 超出上限（1025 > 1024）-> EMSGSIZE。 */
+    {
+        struct packet *pkt = malloc(sizeof(*pkt));
+        CHECK(pkt != NULL);
+        pkt->cmd = CMD_SENSOR_DATA;
+        pkt->payload_len = PROTOCOL_MAX_PAYLOAD_LEN + 1;
+        errno = 0;
+        CHECK(packet_encode(pkt, frame, sizeof(frame)) == -1);
+        CHECK(errno == EMSGSIZE);
         free(pkt);
     }
 }

@@ -176,11 +176,38 @@ static void test_inline_comments(void)
     config_free();
 }
 
+static void test_duplicate_key_and_long_line(void)
+{
+    char path[64];
+    char ini[1024];
+    char long_pad[301];
+
+    memset(long_pad, 'a', 300);
+    long_pad[300] = '\0';
+
+    snprintf(ini, sizeof(ini),
+             "dup_key=first\n"
+             "dup_key=second\n"
+             "# %sfoo=bar\n"
+             "after_long=42\n",
+             long_pad);
+
+    CHECK(load_content(ini, path, sizeof(path)) == 0);
+    /* 重复 key 采用后值覆盖前值。 */
+    CHECK(strcmp(config_get_string("dup_key", ""), "second") == 0);
+    /* >255 字节超长注释行的尾部 foo=bar 不被误解析为新配置项。 */
+    CHECK(config_get_string("foo", NULL) == NULL);
+    CHECK(config_get_int("after_long", -1) == 42);
+
+    config_free();
+}
+
 int main(void)
 {
     test_valid_ini();
     test_int_edge_cases();
     test_inline_comments();
+    test_duplicate_key_and_long_line();
     test_missing_file();
     test_too_many_entries();
     test_reload_replaces();

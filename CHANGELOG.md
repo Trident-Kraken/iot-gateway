@@ -5,11 +5,21 @@
 
 ## [Unreleased]
 
+### 修复
+
+- `fix(epoll)`: 修复 `conn_pool_acquire()` 在 1024 连接池满时误将 `g_conn_free == NULL` 判为未初始化并重新调用 `conn_pool_init()` 覆写全部活跃连接槽位的 P0 缺陷，改为独立 `g_conn_pool_initialized` 标志；调整 `handle_listen()` 先取槽再注册解析器/连接管理器；`EPOLLIN` 优先于 `EPOLLERR | EPOLLHUP` 处理避免短连接末帧丢失；`epoll_worker_run()` 致命错误退出路径同样统一清理全部活跃连接；`pipe_conn` 注册失败不再静默忽略；新增 `PIPE_BUF` 编译期断言与部分写/发送日志区分。
+- `fix(main)`: 统一逆序停机清理 `cleanup_gateway()`（先停心跳与线程池再销毁 self-pipe，消除停机期间写 `g_close_pipe[1]` 的数据竞争，并补齐失败回滚缺失的 `conn_manager_destroy()`）；进程启动忽略 `SIGPIPE`；提前初始化 `logger` 以落盘配置解析告警，并补充 `heartbeat_interval`/`heartbeat_timeout` 范围校验。
+- `fix(server)`: 新增 `server_close()` 清理 `g_reserve_fd`；`server_drain_backlog_reject()` 排空遇到 `EINTR`/`ECONNABORTED`/`EPROTO` 时继续排空；`server_accept()` 对先前重开失败的 `g_reserve_fd` 做静默懒补开并重置循环内 `client_addr_len`。
+- `fix(business)`: 修复 `json_extract()` 同名 value 碰撞并严格按 `json_len` 限界扫描（消除每帧 `malloc/free`）；新增 RFC 8259 数字格式校验与 `device_id` 字符清洗防止拼出非法 JSON。
+- `fix(mqtt)`: `mqtt_cache_flush()` 先冲刷完缓存再置 `connected=1`，冲刷中途断线时将未发出消息与新入队消息按序合并保留在离线缓存中不再丢弃；`rand()` 改为管理线程专属 `rand_r()`。
+- `fix(utils/protocol)`: `logger_rotate()` 在 `rename()` 失败重开原文件时重置 `g_log_size` 防止文件开关风暴，并加锁保护 `logger_init`/`logger_destroy`；`protocol.c` 使用编译期常量 CRC16 查找表、`packet_checksum_verify()` 空指针校验与 `packet_encode()` payload 上限检查；`config_parser.c` 丢弃超长行尾部并用后值覆盖重复 key。
+- `fix(tests/docs)`: 修复 `run_e2e.sh` 使用 Mosquitto 2.x 不存在的 `--pid-file` 参数；修复 `stress_test.py` 限速时钟基准混用及实时进度条恒为 0；清理集成脚本未关闭文件句柄；新增 `unit_business` 并注册 `unit_ringbuffer_wrap` 至 CTest，补齐 `Threads::Threads` 链接；修复 `docs/wireshark_guide.md` 过时导入路径。
+
 ## [1.0.0] - 2026-08-23
 
 首个正式版本。核心链路（TCP 接入 → 状态机拆包 → 线程池分发 → MQTT 上报/下行）功能完整；经 Day3 测试体系（14 项 CTest、ASan/TSan、压测、soak）与 Day4 工程级代码审查（P0×1 + P1×3 全部修复并带区分度回归用例）验证。
 
-- 性能：100 连接 × 10fps 压测 988.3 QPS（历史基线 991.1，无回退），P99 0.42ms，0 错误。
+- 性能：100 连接 × 10fps 压测客户端发送速率 988.3 帧/秒（目标 1000，达成率 98.8%），客户端构帧及发送耗时 P99 0.42ms，0 发送错误；补充 0x03 RTT 端到端探针 P99 5.73ms。
 - 稳定性：30 分钟 soak ~7.2 万帧 RSS +124kB（阈值 8192kB）；SIGTERM 优雅停机全链路清理 exit 0。
 - 质量门槛：Release/ASan/TSan 三构建 CTest 14/14 全绿；GitHub Actions CI。
 

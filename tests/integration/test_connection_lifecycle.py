@@ -175,11 +175,12 @@ def main() -> int:
         check("D. SIGTERM 后网关优雅退出 (exit=0)",
               exit_code == 0, f"(exit={exit_code})")
     finally:
-        gw.terminate()
-        try:
-            gw.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            gw.kill()
+        if gw.poll() is None:
+            gw.terminate()
+            try:
+                gw.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                gw.kill()
         shutil.rmtree(tmp, ignore_errors=True)
 
     if failures:

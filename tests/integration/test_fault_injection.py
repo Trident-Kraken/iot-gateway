@@ -95,20 +95,6 @@ def port_free(port: int) -> bool:
         return True
 
 
-def count_mqtt(timeout: int) -> int:
-    out_file = "/tmp/iotgw_fault_msgs.txt"
-    with open(out_file, "w") as f:
-        subprocess.run(
-            ["mosquitto_sub", "-h", HOST, "-p", str(MQTT_PORT),
-             "-t", TOPIC, "-W", str(timeout)],
-            stdout=f, stderr=subprocess.DEVNULL, timeout=timeout + 5)
-    try:
-        with open(out_file) as f:
-            return sum(1 for _ in f)
-    except OSError:
-        return 0
-
-
 def main() -> int:
     if not os.path.isfile(GW_BIN):
         print("[SKIP] 网关未构建")
@@ -147,21 +133,23 @@ def main() -> int:
         # --- 1. 4 类异常帧周期性注入 ---
         for anom in ANOMALIES:
             min_ok = MIN_HALF if anom == "half_frame" else MIN_NORMAL
+            sub_out_path = os.path.join(tmp, f"fault_sub_{anom}.txt")
             # 订阅端先起，再注入流量（QoS0 不重放）
-            sub = subprocess.Popen(
-                ["mosquitto_sub", "-h", HOST, "-p", str(MQTT_PORT),
-                 "-t", TOPIC, "-W", "12"],
-                stdout=open("/tmp/iotgw_fault_sub.txt", "w"),
-                stderr=subprocess.DEVNULL)
-            time.sleep(1)
-            subprocess.run(
-                [sys.executable, SIM, "--host", HOST, "--port", str(GW_PORT),
-                 "--devices", "2", "--freq", "2", "--duration", "3",
-                 "--anomaly", anom, "--anomaly-interval", "5"],
-                capture_output=True, text=True, timeout=30)
-            sub.wait(timeout=15)
+            with open(sub_out_path, "w") as sub_out:
+                sub = subprocess.Popen(
+                    ["mosquitto_sub", "-h", HOST, "-p", str(MQTT_PORT),
+                     "-t", TOPIC, "-W", "12"],
+                    stdout=sub_out,
+                    stderr=subprocess.DEVNULL)
+                time.sleep(1)
+                subprocess.run(
+                    [sys.executable, SIM, "--host", HOST, "--port", str(GW_PORT),
+                     "--devices", "2", "--freq", "2", "--duration", "3",
+                     "--anomaly", anom, "--anomaly-interval", "5"],
+                    capture_output=True, text=True, timeout=30)
+                sub.wait(timeout=15)
             try:
-                with open("/tmp/iotgw_fault_sub.txt") as f:
+                with open(sub_out_path) as f:
                     n = sum(1 for _ in f)
             except OSError:
                 n = 0

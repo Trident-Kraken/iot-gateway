@@ -39,6 +39,22 @@ static void handle_shutdown_signal(int sig)
     epoll_worker_request_stop();
 }
 
+static int ignore_sigpipe(void)
+{
+    struct sigaction sa;
+
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = SIG_IGN;
+    sigemptyset(&sa.sa_mask);
+
+    if (sigaction(SIGPIPE, &sa, NULL) != 0) {
+        LOG_ERROR("failed to ignore SIGPIPE: %s", strerror(errno));
+        return -1;
+    }
+
+    return 0;
+}
+
 static int install_shutdown_handlers(void)
 {
     struct sigaction sa;
@@ -58,6 +74,27 @@ static int install_shutdown_handlers(void)
     return 0;
 }
 
+/*
+ * 按初始化严格逆序销毁全部已启动模块（各模块 destroy 均幂等）：
+ *   1. heartbeat_stop() / threadpool_destroy()：先停掉所有仍可能向
+ *      self-pipe 或 MQTT 发送数据的后台生产/工作线程；
+ *   2. epoll_worker_destroy()：确认工作线程已全部退出后再关闭 self-pipe，
+ *      消除停机期间写 g_close_pipe[1] 的数据竞争；
+ *   3. mqtt_client_destroy() / conn_manager_destroy()：释放业务/连接管理器；
+ *   4. server_close() / logger_destroy() / config_free()。
+ */
+static void cleanup_gateway(int listen_fd)
+{
+    server_close(listen_fd);
+    heartbeat_stop();
+    threadpool_destroy();
+    epoll_worker_destroy();
+    mqtt_client_destroy();
+    conn_manager_destroy();
+    logger_destroy();
+    config_free();
+}
+
 int main(int argc, char *argv[])
 {
     const char *config_path;
@@ -70,7 +107,7 @@ int main(int argc, char *argv[])
     const char *mqtt_broker;
     int mqtt_port;
     int mqtt_qos;
-    int listen_fd;
+    int listen_fd = -1;
 
     (void)argc;
     (void)argv;
@@ -82,10 +119,7 @@ int main(int argc, char *argv[])
         return EXIT_FAILURE;
     }
 
-    server_port = config_get_int("server_port", 8080);
-    thread_pool_size = config_get_int("thread_pool_size", 4);
-    heartbeat_interval = config_get_int("heartbeat_interval", 5);
-    heartbeat_timeout = config_get_int("heartbeat_timeout", 15);
+    /* 先初始化日志系统，确保后续 config_get_int() 的非法值告警能落盘。 */
     log_level_str = config_get_string("log_level", "INFO");
     log_level = logger_level_from_string(log_level_str);
 
@@ -95,19 +129,41 @@ int main(int argc, char *argv[])
         return EXIT_FAILURE;
     }
 
+    if (ignore_sigpipe() != 0) {
+        cleanup_gateway(-1);
+        return EXIT_FAILURE;
+    }
+
+    server_port = config_get_int("server_port", 8080);
+    thread_pool_size = config_get_int("thread_pool_size", 4);
+    heartbeat_interval = config_get_int("heartbeat_interval", 5);
+    heartbeat_timeout = config_get_int("heartbeat_timeout", 15);
+
     /* 配置范围校验：非法值直接拒绝启动，避免静默截断/误配。 */
     if (server_port <= 0 || server_port > 65535) {
         LOG_ERROR("invalid server_port=%d (must be 1..65535)", server_port);
-        logger_destroy();
-        config_free();
+        cleanup_gateway(-1);
         return EXIT_FAILURE;
     }
 
     if (thread_pool_size <= 0 || thread_pool_size > 64) {
         LOG_ERROR("invalid thread_pool_size=%d (must be 1..64)",
                   thread_pool_size);
-        logger_destroy();
-        config_free();
+        cleanup_gateway(-1);
+        return EXIT_FAILURE;
+    }
+
+    if (heartbeat_interval <= 0 || heartbeat_interval > 3600) {
+        LOG_ERROR("invalid heartbeat_interval=%d (must be 1..3600)",
+                  heartbeat_interval);
+        cleanup_gateway(-1);
+        return EXIT_FAILURE;
+    }
+
+    if (heartbeat_timeout <= 0 || heartbeat_timeout > 86400) {
+        LOG_ERROR("invalid heartbeat_timeout=%d (must be 1..86400)",
+                  heartbeat_timeout);
+        cleanup_gateway(-1);
         return EXIT_FAILURE;
     }
 
@@ -117,15 +173,13 @@ int main(int argc, char *argv[])
 
     if (mqtt_port <= 0 || mqtt_port > 65535) {
         LOG_ERROR("invalid mqtt_port=%d (must be 1..65535)", mqtt_port);
-        logger_destroy();
-        config_free();
+        cleanup_gateway(-1);
         return EXIT_FAILURE;
     }
 
     if (mqtt_qos < 0 || mqtt_qos > 2) {
         LOG_ERROR("invalid mqtt_qos=%d (must be 0..2)", mqtt_qos);
-        logger_destroy();
-        config_free();
+        cleanup_gateway(-1);
         return EXIT_FAILURE;
     }
 
@@ -144,62 +198,38 @@ int main(int argc, char *argv[])
     /* 初始化MQTT 客户端（连接 Mosquitto Broker）。*/
     if (mqtt_client_init(mqtt_broker, mqtt_port, NULL, mqtt_qos) != 0) {
         LOG_ERROR("failed to initialize MQTT client");
-        logger_destroy();
-        config_free();
+        cleanup_gateway(-1);
         return EXIT_FAILURE;
     }
 
     if (threadpool_init(thread_pool_size, worker_process_task) != 0) {
         LOG_ERROR("failed to initialize thread pool");
-        mqtt_client_destroy();
-        logger_destroy();
-        config_free();
+        cleanup_gateway(-1);
         return EXIT_FAILURE;
     }
 
     if (epoll_worker_init() != 0) {
         LOG_ERROR("failed to initialize epoll worker pipe");
-        threadpool_destroy();
-        mqtt_client_destroy();
-        logger_destroy();
-        config_free();
+        cleanup_gateway(-1);
         return EXIT_FAILURE;
     }
 
     if (heartbeat_init(heartbeat_interval, heartbeat_timeout) != 0) {
         LOG_ERROR("failed to initialize heartbeat monitor");
-        epoll_worker_destroy();
-        threadpool_destroy();
-        mqtt_client_destroy();
-        logger_destroy();
-        config_free();
+        cleanup_gateway(-1);
         return EXIT_FAILURE;
     }
 
     if (heartbeat_start() != 0) {
         LOG_ERROR("failed to start heartbeat monitor");
-        /* 按初始化逆序清理：先停工作线程（可能正在调用 mqtt_publish），
-         * 再销毁 MQTT 客户端，避免并发访问已销毁的单例。 */
-        heartbeat_stop();
-        epoll_worker_destroy();
-        threadpool_destroy();
-        mqtt_client_destroy();
-        logger_destroy();
-        config_free();
+        cleanup_gateway(-1);
         return EXIT_FAILURE;
     }
 
     listen_fd = server_init((uint16_t)server_port);
     if (listen_fd < 0) {
         LOG_ERROR("failed to initialize server on port %d", server_port);
-        /* 心跳线程已运行：先停心跳，再停工作线程，最后销毁 MQTT 客户端
-         * （工作线程可能正在调用 mqtt_publish）。 */
-        heartbeat_stop();
-        epoll_worker_destroy();
-        threadpool_destroy();
-        mqtt_client_destroy();
-        logger_destroy();
-        config_free();
+        cleanup_gateway(-1);
         return EXIT_FAILURE;
     }
 
@@ -210,20 +240,12 @@ int main(int argc, char *argv[])
      * 处理器仅置标志，由事件循环超时轮询感知并优雅退出。
      */
     if (install_shutdown_handlers() != 0) {
-        heartbeat_stop();
-        epoll_worker_destroy();
-        threadpool_destroy();
-        mqtt_client_destroy();
-        logger_destroy();
-        config_free();
-        close(listen_fd);
+        cleanup_gateway(listen_fd);
         return EXIT_FAILURE;
     }
 
     /* 阻塞运行：优雅停机返回 0（Day4 F3），致命 epoll 错误返回 -1。 */
     int rc = epoll_worker_run(listen_fd);
-
-    close(listen_fd);
 
     if (rc == 0) {
         LOG_INFO("shutdown: %s received, exiting gracefully",
@@ -231,14 +253,7 @@ int main(int argc, char *argv[])
                  g_signal_num == SIGTERM ? "SIGTERM" : "stop request");
     }
 
-    /* 按初始化逆序清理全部资源（此前为不可达死代码，F3 后真实执行）。 */
-    heartbeat_stop();
-    epoll_worker_destroy();
-    threadpool_destroy();
-    mqtt_client_destroy();
-    conn_manager_destroy();
-    logger_destroy();
-    config_free();
+    cleanup_gateway(listen_fd);
 
     return rc == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
 }

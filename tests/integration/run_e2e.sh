@@ -10,7 +10,6 @@ cd "$ROOT_DIR"   # 网关以仓库根为 cwd（依赖 config/、logs/ 相对路�
 GATEWAY="$ROOT_DIR/build/src/iot-gateway"
 SIM="$ROOT_DIR/tests/integration/device_simulator.py"
 CFG_TEST="$ROOT_DIR/tests/integration/config_downlink_test.py"
-PID_FILE="/tmp/iotgw_e2e_mosquitto.pid"
 GW_LOG="/tmp/iotgw_e2e_gw.log"
 MQTT_OUT="/tmp/iotgw_e2e_mqtt.txt"
 
@@ -43,10 +42,7 @@ fi
 
 cleanup() {
     [ -n "$GW_PID" ] && kill "$GW_PID" 2>/dev/null || true
-    if [ -n "$BROKER_PID" ]; then
-        kill "$BROKER_PID" 2>/dev/null || true
-        rm -f "$PID_FILE"
-    fi
+    [ -n "$BROKER_PID" ] && kill "$BROKER_PID" 2>/dev/null || true
     rm -f "$MQTT_OUT"
 }
 trap cleanup EXIT
@@ -56,11 +52,11 @@ if (echo > "/dev/tcp/$HOST/$MQTT_PORT") 2>/dev/null; then
     log "复用已运行的 broker ($HOST:$MQTT_PORT)"
 else
     log "启动 mosquitto ($HOST:$MQTT_PORT)"
-    rm -f "$PID_FILE"
-    mosquitto -d -p "$MQTT_PORT" --pid-file "$PID_FILE" 2>/dev/null
-    [ -f "$PID_FILE" ] && BROKER_PID="$(cat "$PID_FILE")"
+    mosquitto -p "$MQTT_PORT" >/dev/null 2>&1 &
+    BROKER_PID=$!
     for _ in $(seq 1 20); do
         (echo > "/dev/tcp/$HOST/$MQTT_PORT") 2>/dev/null && break
+        kill -0 "$BROKER_PID" 2>/dev/null || break
         sleep 0.5
     done
     if ! (echo > "/dev/tcp/$HOST/$MQTT_PORT") 2>/dev/null; then

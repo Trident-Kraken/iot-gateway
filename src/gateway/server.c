@@ -74,7 +74,11 @@ int server_init(uint16_t port)
     }
 
     /* 打开 reserve fd（Day4 F2）：失败仅告警——极少数环境无 /dev/null
-     * 时退化为旧的"EMFILE 即停止 accept"行为。 */
+     * 时退化为旧的"EMFILE 即停止 accept"行为。先防重入泄漏旧描述符。 */
+    if (g_reserve_fd >= 0) {
+        close(g_reserve_fd);
+        g_reserve_fd = -1;
+    }
     g_reserve_fd = open("/dev/null", O_RDONLY | O_CLOEXEC);
     if (g_reserve_fd == -1) {
         LOG_ERROR("server_init: reserve fd open failed: %s",
@@ -82,6 +86,18 @@ int server_init(uint16_t port)
     }
 
     return listen_fd;
+}
+
+void server_close(int listen_fd)
+{
+    if (listen_fd >= 0) {
+        close(listen_fd);
+    }
+
+    if (g_reserve_fd >= 0) {
+        close(g_reserve_fd);
+        g_reserve_fd = -1;
+    }
 }
 
 /*
@@ -100,7 +116,11 @@ static void server_drain_backlog_reject(int listen_fd)
     for (;;) {
         fd = accept(listen_fd, NULL, NULL);
         if (fd == -1) {
-            break; /* EAGAIN：backlog 已排空 */
+            if (errno == EINTR || errno == ECONNABORTED || errno == EPROTO) {
+                /* 瞬时中断或对端已放弃，必须继续排空剩余 backlog。 */
+                continue;
+            }
+            break; /* EAGAIN 等：backlog 已排空 */
         }
         close(fd); /* 无 fd 可分配：立即拒绝该连接。 */
         drained++;
@@ -129,9 +149,13 @@ int server_accept(int listen_fd)
         return -1;
     }
 
-    client_addr_len = sizeof(client_addr);
+    /* 若此前因暂时 fd 紧张导致 reserve fd 重开失败，趁机静默补开。 */
+    if (g_reserve_fd < 0) {
+        g_reserve_fd = open("/dev/null", O_RDONLY | O_CLOEXEC);
+    }
 
     for (;;) {
+        client_addr_len = sizeof(client_addr);
         client_fd = accept(listen_fd,
                            (struct sockaddr *)&client_addr,
                            &client_addr_len);

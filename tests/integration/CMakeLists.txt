@@ -16,6 +16,12 @@ add_test(
             ${CMAKE_CURRENT_SOURCE_DIR}/device_simulator.py
             ${CMAKE_CURRENT_SOURCE_DIR}/stress_test.py
             ${CMAKE_CURRENT_SOURCE_DIR}/config_downlink_test.py
+            ${CMAKE_CURRENT_SOURCE_DIR}/test_connection_lifecycle.py
+            ${CMAKE_CURRENT_SOURCE_DIR}/test_mqtt_offline_cache.py
+            ${CMAKE_CURRENT_SOURCE_DIR}/test_config_validation.py
+            ${CMAKE_CURRENT_SOURCE_DIR}/test_fault_injection.py
+            ${CMAKE_CURRENT_SOURCE_DIR}/test_stale_event_race.py
+            ${CMAKE_CURRENT_SOURCE_DIR}/test_fd_exhaustion.py
 )
 
 add_test(

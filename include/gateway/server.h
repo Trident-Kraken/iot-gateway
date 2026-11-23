@@ -33,6 +33,13 @@ int server_init(uint16_t port);
  */
 int server_accept(int listen_fd);
 
+/**
+ * @brief 关闭监听 socket 并释放 server 模块内部保留的 reserve fd。
+ *
+ * @param listen_fd 由 server_init() 返回的监听 socket 文件描述符（<0 时跳过关闭）。
+ */
+void server_close(int listen_fd);
+
 #ifdef __cplusplus
 }
 #endif

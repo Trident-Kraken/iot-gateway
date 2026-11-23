@@ -9,6 +9,7 @@ add_executable(unit_tests
 )
 
 target_include_directories(unit_tests PRIVATE ${CMAKE_SOURCE_DIR}/include)
+target_link_libraries(unit_tests PRIVATE Threads::Threads)
 
 add_test(NAME unit_tests COMMAND unit_tests)
 
@@ -32,6 +33,7 @@ add_executable(test_task_queue
 )
 
 target_include_directories(test_task_queue PRIVATE ${CMAKE_SOURCE_DIR}/include)
+target_link_libraries(test_task_queue PRIVATE Threads::Threads)
 
 add_test(NAME unit_task_queue COMMAND test_task_queue)
 
@@ -56,3 +58,26 @@ add_executable(test_fd_util
 target_include_directories(test_fd_util PRIVATE ${CMAKE_SOURCE_DIR}/include)
 
 add_test(NAME unit_fd_util COMMAND test_fd_util)
+
+# ringbuffer 绕回边界单元测试。
+add_executable(test_ringbuffer_wrap
+    test_ringbuffer_wrap.c
+    ${CMAKE_SOURCE_DIR}/src/utils/ringbuffer.c
+)
+
+target_include_directories(test_ringbuffer_wrap PRIVATE ${CMAKE_SOURCE_DIR}/include)
+
+add_test(NAME unit_ringbuffer_wrap COMMAND test_ringbuffer_wrap)
+
+# business_handler 单元测试（JSON 提取碰撞/校验/清洗 + 命令分发）。
+add_executable(test_business
+    test_business.c
+    ${CMAKE_SOURCE_DIR}/src/business/business_handler.c
+    ${CMAKE_SOURCE_DIR}/src/protocol/protocol.c
+    ${CMAKE_SOURCE_DIR}/src/utils/logger.c
+)
+
+target_include_directories(test_business PRIVATE ${CMAKE_SOURCE_DIR}/include)
+target_link_libraries(test_business PRIVATE Threads::Threads)
+
+add_test(NAME unit_business COMMAND test_business)

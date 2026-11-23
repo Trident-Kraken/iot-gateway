@@ -1,6 +1,9 @@
+#define _POSIX_C_SOURCE 200809L /* PIPE_BUF */
+
 #include "gateway/epoll_worker.h"
 
 #include <errno.h>
+#include <limits.h>
 #include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -73,6 +76,7 @@ static uint64_t g_generation = 0;
  * 符合 AGENTS §2.3「只实现项目够用的连接池」。 */
 static struct connection g_conn_pool[CONN_POOL_CAPACITY];
 static struct connection *g_conn_free = NULL;
+static int g_conn_pool_initialized = 0;
 
 /* 本 epoll_wait 批次内已关闭、待批末归还的连接槽（LIFO，仅 epoll 线程访问）。
  * 为什么不立即归还空闲链：events[] 是 epoll_wait 返回时刻的快照，同批内
@@ -81,25 +85,35 @@ static struct connection *g_conn_free = NULL;
  * 绝不复用，配合 closed 标志可安全跳过陈旧事件。 */
 static struct connection *g_conn_trash = NULL;
 
+/*
+ * 面试点注释（对象池初始化标志与耗尽区分）：
+ *   绝不能用 `g_conn_free == NULL` 判断对象池是否已初始化！当 1024 个
+ *   活跃连接同时存在时，`g_conn_free` 也会自然变为 NULL（池已耗尽）。
+ *   若误以 `g_conn_free == NULL` 再次触发 `conn_pool_init()`，会把正在
+ *   使用的 1024 个连接槽位全部重置串回空闲链，直接破坏 `g_conn_list`
+ *   活跃链表并清零活跃槽位。必须用独立的 `g_conn_pool_initialized` 标志。
+ */
 static void conn_pool_init(void)
 {
     size_t i;
 
-    if (g_conn_free != NULL) {
+    if (g_conn_pool_initialized) {
         return;
     }
 
+    g_conn_free = NULL;
     for (i = 0; i < CONN_POOL_CAPACITY; i++) {
         g_conn_pool[i].next = g_conn_free;
         g_conn_free = &g_conn_pool[i];
     }
+    g_conn_pool_initialized = 1;
 }
 
 static struct connection *conn_pool_acquire(void)
 {
     struct connection *conn;
 
-    if (g_conn_free == NULL) {
+    if (!g_conn_pool_initialized) {
         conn_pool_init();
     }
 
@@ -154,6 +168,9 @@ struct pipe_msg {
     uint8_t  data[PROTOCOL_MAX_FRAME_SIZE];
 };
 
+_Static_assert(sizeof(struct pipe_msg) <= PIPE_BUF,
+               "struct pipe_msg must fit in PIPE_BUF for atomic pipe writes");
+
 /* =========================================================================
  * Connection list helpers (epoll thread only, no lock needed)
  * ========================================================================= */
@@ -193,6 +210,9 @@ static struct connection *conn_list_find(int fd, uint64_t generation)
 
 int epoll_worker_init(void)
 {
+    conn_pool_init();
+    g_stop_requested = 0;
+
     if (g_close_pipe[0] != -1) {
         return 0; /* already initialized */
     }
@@ -262,9 +282,14 @@ void epoll_worker_request_close(int fd, uint64_t generation)
     msg.len = 0;
 
     ssize_t n = write(g_close_pipe[1], &msg, sizeof(msg));
-    if (n != (ssize_t)sizeof(msg) && errno != EAGAIN) {
-        LOG_ERROR("epoll_worker_request_close: pipe write failed fd=%d: %s",
-                  fd, strerror(errno));
+    if (n == -1) {
+        if (errno != EAGAIN && errno != EWOULDBLOCK) {
+            LOG_ERROR("epoll_worker_request_close: pipe write failed fd=%d: %s",
+                      fd, strerror(errno));
+        }
+    } else if (n != (ssize_t)sizeof(msg)) {
+        LOG_ERROR("epoll_worker_request_close: pipe short write fd=%d "
+                  "(%zd/%zu bytes)", fd, n, sizeof(msg));
     }
 }
 
@@ -360,16 +385,16 @@ static void connection_close(int epoll_fd, struct connection *conn)
 
     if (epoll_ctl(epoll_fd, EPOLL_CTL_DEL, conn->fd, NULL) == -1) {
         /*
-         * 忽略 EBADF：如果对端重置了连接，该 fd 可能已被内核关闭。
-         * 记录其他错误以用于诊断。
+         * 忽略 EBADF/ENOENT：如果对端重置或 fd 尚未加入 epoll（如注册失败回滚），
+         * 该 fd 可能已不在 epoll 实例中。记录其他错误以用于诊断。
          */
-        if (errno != EBADF) {
+        if (errno != EBADF && errno != ENOENT) {
             LOG_ERROR("connection_close: epoll_ctl DEL fd=%d failed: %s",
                       conn->fd, strerror(errno));
         }
     }
 
-    if (conn->role != CONN_ROLE_LISTEN) {
+    if (conn->role == CONN_ROLE_CLIENT) {
         /* 释放解析器上下文及其每连接RingBuffer。*/
         packet_parser_unregister(conn->fd);
         /* 从连接管理器移除（心跳检测）。*/
@@ -420,10 +445,19 @@ static void handle_listen(int epoll_fd, int listen_fd)
             break;
         }
 
+        conn = conn_pool_acquire();
+        if (conn == NULL) {
+            LOG_ERROR("handle_listen: connection pool exhausted (%d), "
+                      "closing fd=%d", CONN_POOL_CAPACITY, client_fd);
+            close(client_fd);
+            continue;
+        }
+
         /* 为该连接注册专用的解析器上下文（含RingBuffer）。*/
         if (packet_parser_register(client_fd, NULL) != 0) {
             LOG_ERROR("handle_listen: packet_parser_register failed, "
                       "closing fd=%d", client_fd);
+            conn_pool_release(conn);
             close(client_fd);
             continue;
         }
@@ -435,16 +469,7 @@ static void handle_listen(int epoll_fd, int listen_fd)
             LOG_ERROR("handle_listen: conn_manager_add failed, closing fd=%d",
                       client_fd);
             packet_parser_unregister(client_fd);
-            close(client_fd);
-            continue;
-        }
-
-        conn = conn_pool_acquire();
-        if (conn == NULL) {
-            LOG_ERROR("handle_listen: connection pool exhausted (%d), "
-                      "closing fd=%d", CONN_POOL_CAPACITY, client_fd);
-            conn_manager_remove(client_fd);
-            packet_parser_unregister(client_fd);
+            conn_pool_release(conn);
             close(client_fd);
             continue;
         }
@@ -579,9 +604,12 @@ static void handle_pipe_messages(int epoll_fd)
                  * 或连接已断开时直接丢弃并记日志，配置响应可重发。 */
                 ssize_t sent = send(conn->fd, msg->data, msg->len,
                                     MSG_NOSIGNAL);
-                if (sent != (ssize_t)msg->len) {
+                if (sent < 0) {
                     LOG_ERROR("epoll: send downlink fd=%d failed: %s",
                               msg->fd, strerror(errno));
+                } else if (sent != (ssize_t)msg->len) {
+                    LOG_ERROR("epoll: send downlink fd=%d partial (%zd/%u bytes)",
+                              msg->fd, sent, (unsigned int)msg->len);
                 } else {
                     LOG_INFO("epoll: sent downlink frame to fd=%d (%u bytes)",
                              msg->fd, (unsigned int)msg->len);
@@ -633,13 +661,17 @@ int epoll_worker_run(int listen_fd)
         pipe_conn = calloc(1, sizeof(*pipe_conn));
         if (pipe_conn == NULL) {
             LOG_ERROR("epoll_worker_run: calloc pipe_conn failed");
-        } else {
-            pipe_conn->fd = g_close_pipe[0];
-            pipe_conn->role = CONN_ROLE_PIPE;
-            if (epoll_add(epoll_fd, g_close_pipe[0], pipe_conn) == -1) {
-                free(pipe_conn);
-                pipe_conn = NULL;
-            }
+            free(listen_conn);
+            close(epoll_fd);
+            return -1;
+        }
+        pipe_conn->fd = g_close_pipe[0];
+        pipe_conn->role = CONN_ROLE_PIPE;
+        if (epoll_add(epoll_fd, g_close_pipe[0], pipe_conn) == -1) {
+            free(pipe_conn);
+            free(listen_conn);
+            close(epoll_fd);
+            return -1;
         }
     }
 
@@ -695,14 +727,13 @@ int epoll_worker_run(int listen_fd)
 
             ev = events[i].events;
 
-            /* 错误/挂起事件也意味着应该关闭连接（仅客户端连接）。 */
-            if (ev & (EPOLLERR | EPOLLHUP)) {
-                if (conn->role == CONN_ROLE_CLIENT) {
-                    connection_close(epoll_fd, conn);
-                }
-                continue;
-            }
-
+            /*
+             * 面试点注释（EPOLLIN | EPOLLHUP 同批处理顺序）：
+             * 短连接客户端发完最后一帧后立刻 close，内核可能在同一事件中
+             * 同时上报 EPOLLIN | EPOLLHUP。必须先处理 EPOLLIN 排空内核接收
+             * 缓冲区，再检查 EPOLLERR | EPOLLHUP 执行关闭；若先关闭并 continue，
+             * 最后到达的有效帧会被静默丢弃。
+             */
             if (ev & EPOLLIN) {
                 if (conn->role == CONN_ROLE_LISTEN) {
                     handle_listen(epoll_fd, conn->fd);
@@ -710,6 +741,13 @@ int epoll_worker_run(int listen_fd)
                     handle_pipe_messages(epoll_fd);
                 } else {
                     handle_client(epoll_fd, conn);
+                }
+            }
+
+            /* 错误/挂起事件意味着应该关闭连接（仅尚未关闭的客户端连接）。 */
+            if (!conn->closed && (ev & (EPOLLERR | EPOLLHUP))) {
+                if (conn->role == CONN_ROLE_CLIENT) {
+                    connection_close(epoll_fd, conn);
                 }
             }
         }
@@ -720,27 +758,29 @@ int epoll_worker_run(int listen_fd)
     }
 
     /*
-     * 循环退出两种途径（Day4 F3）：
-     *   1. g_stop_requested（SIGTERM/SIGINT 优雅停机）→ 关闭全部存活
-     *      客户端连接，走与运行期完全相同的 connection_close 清理路径
-     *      （epoll DEL / parser 注销 / conn_manager 移除 / close），
-     *      返回 0，main() 由此进入既有逆序清理序列；
-     *   2. 致命 epoll_wait 错误 → 返回 -1。
+     * 退出清理（无论是 SIGTERM/SIGINT 优雅停机还是致命 epoll 错误）：
+     * 统一关闭全部存活客户端连接，避免 fd 与 parse_ctx 泄漏。
      */
-    if (g_stop_requested) {
+    {
+        int stopped = (g_stop_requested != 0);
+
         while (g_conn_list != NULL) {
             connection_close(epoll_fd, g_conn_list);
         }
         conn_pool_flush_trash();
-        LOG_INFO("epoll_worker_run: graceful shutdown, all client "
-                 "connections closed");
+        g_stop_requested = 0;
+
+        if (stopped) {
+            LOG_INFO("epoll_worker_run: graceful shutdown, all client "
+                     "connections closed");
+        }
+
+        free(listen_conn);
+        free(pipe_conn); /* NULL-safe */
+        close(epoll_fd);
+
+        return stopped ? 0 : -1;
     }
-
-    free(listen_conn);
-    free(pipe_conn); /* NULL-safe */
-    close(epoll_fd);
-
-    return g_stop_requested ? 0 : -1;
 }
 
 /*

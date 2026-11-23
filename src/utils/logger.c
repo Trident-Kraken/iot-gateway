@@ -26,10 +26,18 @@ enum log_level g_log_level = LOG_LEVEL_INFO;
 
 int logger_init(const char *path, enum log_level level)
 {
+    pthread_mutex_lock(&g_log_mutex);
+
+    if (g_log_fp != NULL && g_log_fp != stderr) {
+        fclose(g_log_fp);
+    }
+    g_log_fp = NULL;
+    free(g_log_path);
+    g_log_path = NULL;
+    g_log_size = 0;
+
     if (path == NULL) {
         g_log_fp = stderr;
-        g_log_path = NULL;
-        g_log_size = 0;
     } else {
         g_log_fp = fopen(path, "a");
         if (g_log_fp == NULL) {
@@ -39,9 +47,8 @@ int logger_init(const char *path, enum log_level level)
                     "falling back to stderr\n",
                     path, strerror(errno));
             g_log_fp = stderr;
-            g_log_path = NULL;
-            g_log_size = 0;
             g_log_level = level;
+            pthread_mutex_unlock(&g_log_mutex);
             return 0;
         }
 
@@ -56,16 +63,20 @@ int logger_init(const char *path, enum log_level level)
         if (g_log_path == NULL) {
             fclose(g_log_fp);
             g_log_fp = NULL;
+            pthread_mutex_unlock(&g_log_mutex);
             return -1;
         }
     }
 
     g_log_level = level;
+    pthread_mutex_unlock(&g_log_mutex);
     return 0;
 }
 
 void logger_destroy(void)
 {
+    pthread_mutex_lock(&g_log_mutex);
+
     if (g_log_fp != NULL && g_log_fp != stderr) {
         fclose(g_log_fp);
     }
@@ -74,6 +85,8 @@ void logger_destroy(void)
     free(g_log_path);
     g_log_path = NULL;
     g_log_size = 0;
+
+    pthread_mutex_unlock(&g_log_mutex);
 }
 
 void logger_set_level(enum log_level level)
@@ -110,6 +123,7 @@ enum log_level logger_level_from_string(const char *str)
 static int logger_rotate(void)
 {
     char rotated_path[1024];
+    int path_len;
 
     if (g_log_path == NULL || g_log_fp == NULL || g_log_fp == stderr) {
         return 0;
@@ -119,24 +133,31 @@ static int logger_rotate(void)
         return 0;
     }
 
+    path_len = snprintf(rotated_path, sizeof(rotated_path), "%s.1", g_log_path);
+    if (path_len < 0 || (size_t)path_len >= sizeof(rotated_path)) {
+        /* 路径过长无法轮转：重置计数，避免后续每条日志重复触发轮转尝试。 */
+        g_log_size = 0;
+        return -1;
+    }
+
     fclose(g_log_fp);
     g_log_fp = NULL;
 
-    snprintf(rotated_path, sizeof(rotated_path), "%s.1", g_log_path);
     (void)remove(rotated_path);
 
     if (rename(g_log_path, rotated_path) != 0) {
-        /* 尝试重新打开原文件。 */
+        /* 尝试重新打开原文件，同时重置计数防止每条日志都触发文件开关风暴。 */
         g_log_fp = fopen(g_log_path, "a");
+        g_log_size = 0;
         return -1;
     }
 
     g_log_fp = fopen(g_log_path, "a");
+    g_log_size = 0;
     if (g_log_fp == NULL) {
         return -1;
     }
 
-    g_log_size = 0;
     return 0;
 }
 

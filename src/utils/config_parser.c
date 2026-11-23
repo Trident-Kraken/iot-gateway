@@ -89,10 +89,14 @@ int config_load(const char *path)
         char *value;
         char *eq;
 
-        /* 移除末尾换行符。 */
+        /* 移除末尾换行符；超长行（>= CONFIG_LINE_SIZE）丢弃剩余字符，防止尾部误解析为新行。 */
         p = strchr(line, '\n');
         if (p != NULL) {
             *p = '\0';
+        } else if (!feof(fp)) {
+            int ch;
+            while ((ch = fgetc(fp)) != EOF && ch != '\n') {
+            }
         }
 
         p = trim(line);
@@ -129,30 +133,46 @@ int config_load(const char *path)
             continue;
         }
 
-    if (g_entry_count >= CONFIG_MAX_ENTRIES) {
-        fprintf(stderr, "config_load: too many entries (max %d)\n",
-                CONFIG_MAX_ENTRIES);
-        fclose(fp);
-        config_free();
-        errno = ENOSPC;
-        return -1;
-    }
+        /* 重复 key 采用后值覆盖前值，避免插入重复项后 find_entry 永远返回旧值。 */
+        {
+            struct config_entry *existing = find_entry(key);
+            if (existing != NULL) {
+                char *new_val = strdup(value);
+                if (new_val == NULL) {
+                    fclose(fp);
+                    config_free();
+                    return -1;
+                }
+                free(existing->value);
+                existing->value = new_val;
+                continue;
+            }
+        }
 
-    g_entries[g_entry_count].key = strdup(key);
-    g_entries[g_entry_count].value = strdup(value);
-    if (g_entries[g_entry_count].key == NULL ||
-        g_entries[g_entry_count].value == NULL) {
-        /* Free whichever strdup succeeded to avoid partial leak. */
-        free(g_entries[g_entry_count].key);
-        free(g_entries[g_entry_count].value);
-        g_entries[g_entry_count].key = NULL;
-        g_entries[g_entry_count].value = NULL;
-        fclose(fp);
-        config_free();
-        return -1;
-    }
+        if (g_entry_count >= CONFIG_MAX_ENTRIES) {
+            fprintf(stderr, "config_load: too many entries (max %d)\n",
+                    CONFIG_MAX_ENTRIES);
+            fclose(fp);
+            config_free();
+            errno = ENOSPC;
+            return -1;
+        }
 
-    g_entry_count++;
+        g_entries[g_entry_count].key = strdup(key);
+        g_entries[g_entry_count].value = strdup(value);
+        if (g_entries[g_entry_count].key == NULL ||
+            g_entries[g_entry_count].value == NULL) {
+            /* Free whichever strdup succeeded to avoid partial leak. */
+            free(g_entries[g_entry_count].key);
+            free(g_entries[g_entry_count].value);
+            g_entries[g_entry_count].key = NULL;
+            g_entries[g_entry_count].value = NULL;
+            fclose(fp);
+            config_free();
+            return -1;
+        }
+
+        g_entry_count++;
     }
 
     fclose(fp);
