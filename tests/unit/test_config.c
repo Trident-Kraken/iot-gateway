@@ -151,7 +151,7 @@ static void test_reload_replaces(void)
 }
 
 /*
- * F4 回归：行内注释剥离 + 非法整数回退告警（3 例）。
+ * 行内注释剥离与非法整数回退告警回归。
  */
 static void test_inline_comments(void)
 {

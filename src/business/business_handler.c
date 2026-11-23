@@ -342,7 +342,7 @@ void handle_sensor_data(int fd, uint64_t generation,
  *   - 调用 conn_manager_update_active_time() 刷新时间戳。
  *   - 打印 DEBUG 日志。
  *
- * 面试点注释（task_queue / threadpool 深水区）：
+ * 设计说明（task_queue / threadpool 锁粒度）：
  *   该函数运行在工作线程上下文。工作线程从 task_queue_pop() 取出任务后，
  *   通过函数指针表 g_cmd_handlers[0x02] 调用到此函数。函数执行期间不持
  *   有任务队列锁（task_queue_pop 的 mutex 仅在 pop 时持有），因此可以在
@@ -374,7 +374,7 @@ void handle_heartbeat(int fd, uint64_t generation,
  *   - 通过 epoll_worker_request_send() 委托 epoll 线程发送（best-effort）；
  *   - fd + generation 双重匹配，连接已关闭或 fd 被复用时静默丢弃。
  *
- * 面试点注释（业务下行链路）：
+ * 设计说明（业务下行链路）：
  *   工作线程不直接写客户端 fd —— 所有 fd I/O 收敛在 epoll 线程，工作线程
  *   只通过 self-pipe 委托，避免多线程并发读写同一 socket 与 fd 复用竞态。
  */
@@ -433,9 +433,9 @@ void handle_config(int fd, uint64_t generation,
  * 将 g_cmd_handlers[cmd] 赋值为对应的处理函数指针。
  * 未注册的命令字保持 NULL，dispatch 时检查并跳过。
  *
- * 面试点注释：
- *   - 函数指针数组 = 最快的命令分发方式之一（编译器可内联间接调用）。
- *   - 维护时只需加一行赋值即可注册新的命令处理器，无需改动 switch-case。
+ * 设计说明：
+ *   - 函数指针数组提供确定的 O(1) 命令分发（不依赖编译器 switch 跳转表优化）。
+ *   - 维护时只需加一行赋值即可注册新的命令处理器，无需改动分发骨架。
  *   - 数组大小为 256，索引范围与 uint8_t cmd 天然对齐，无需越界检查。
  */
 void cmd_handlers_init(void)
@@ -468,7 +468,7 @@ void cmd_handlers_init(void)
  *   3. 通过函数指针数组 g_cmd_handlers[cmd] 分发给具体处理函数。
  *   4. 未知命令字记录错误并丢弃。
  *
- * 面试点注释（threadpool 深水区）：
+ * 设计说明（I/O 与业务逻辑解耦）：
  *   该函数在工作线程上下文中执行，**不持有任务队列锁**。业务处理（如 JSON
  *   解析、MQTT 发布）与 I/O 线程 epoll 事件循环完全解耦。这保证了：
  *     - I/O 线程即使在高负载下也能快速 recv + 入队，不会被业务逻辑阻塞。
@@ -507,7 +507,7 @@ void worker_process_task(struct task *task)
     payload_len = task->frame_len - PACKET_MIN_SIZE;
 
     /*
-     * 面试点注释：
+     * 设计说明（O(1) 命令分发）：
      *   g_cmd_handlers[task->cmd] 是 O(1) 的数组索引操作。
      *   无论注册了 1 个还是 200 个处理函数，dispatch 耗时恒定。
      *   相比 switch-case，函数指针表在稀疏 case 下性能更稳定。

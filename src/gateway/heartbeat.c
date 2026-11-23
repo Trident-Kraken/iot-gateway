@@ -66,7 +66,7 @@ static void collect_stale(struct conn_entry *entry, void *arg)
 }
 
 /**
- * @brief 可中断睡眠（Day4 F3）：分 100ms 小段轮询 g_running。
+ * @brief 可中断睡眠：分 100ms 小段轮询 g_running。
  *
  * 此前用 sleep(interval) 整段睡眠，heartbeat_stop() 的 pthread_join 最长
  * 要等一个扫描间隔（默认 5s）才能返回，拖慢优雅停机。分段后停机等待

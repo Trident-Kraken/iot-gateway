@@ -1,6 +1,6 @@
 # Linux Industrial IoT TCP Gateway
 
-[![CI](https://github.com/lingfeng-pang/iot-gateway/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/lingfeng-pang/iot-gateway/actions/workflows/ci.yml)
+[![CI](https://github.com/Trident-Kraken/iot-gateway/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Trident-Kraken/iot-gateway/actions/workflows/ci.yml)
 
 基于 **epoll ET + pthread 线程池** 的 Linux 工业物联网通信网关，支持自定义二进制协议解析与 MQTT 数据上报。
 
@@ -78,7 +78,7 @@ mqtt_publish 失败/未连接 → 有界离线缓存（512 条，满淘汰最旧
 | Valgrind | 0 leaks / 0 errors（unit_tests；全量另经 ASan+LeakSanitizer 覆盖） |
 | Stress | 100 connections × 10 fps × 60s，客户端发送速率 **988~991 帧/秒**（目标 1000，达成率 >98.8%） |
 | RTT Probe (0x03) | 负载下配置请求 RTT P99 **5.73 ms**（60/60 成功率 100%，覆盖全链路处理与下行回显） |
-| Historical Baseline | 发送速率 991.1 / 990.2 / 988.3 帧/秒（Day2 / Day3 / Day4 实测，受宿主机调度小幅波动） |
+| Historical Baseline | 发送速率 991.1 / 990.2 / 988.3 帧/秒（历次基线回归实测，受宿主机调度小幅波动） |
 | Soak | 30 min，20 设备 × 2Hz，~72k 帧，全程存活 |
 | RSS Growth | +124 kB（6192→6316 kB，阈值 8192 kB） |
 | 故障注入 / 离线缓存 / 竞态回归 / fd 耗尽 | 全部通过（见测试报告） |
@@ -151,7 +151,7 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DCMAKE_C_FLAGS="-fsanitize=address
 iot-gateway/
 ├── CMakeLists.txt              # 根构建脚本（C11、-Wall -Wextra、add_subdirectory）
 ├── README.md                   # 本文件
-├── AGENTS.md                   # 工程/编码规范（模块职责、深水区注释约定）
+├── AGENTS.md                   # 架构约定与编码规范（技术约束、模块边界、并发锁规范）
 ├── CHANGELOG.md                # 版本变更记录
 ├── LICENSE                     # MIT License
 ├── .github/workflows/          # CI：构建 + CTest + 端到端集成冒烟
@@ -177,4 +177,4 @@ iot-gateway/
 
 ## License
 
-MIT License — 校招/课程设计演示。
+MIT License — 详见 [LICENSE](LICENSE)。

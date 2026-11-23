@@ -28,7 +28,7 @@ command -v mosquitto      >/dev/null 2>&1 || { log "SKIP: mosquitto 未安装"; 
 command -v mosquitto_sub  >/dev/null 2>&1 || { log "SKIP: mosquitto_sub 未安装"; exit 77; }
 [ -x "$GATEWAY" ] || { log "SKIP: 网关未构建（先执行 cmake --build build）"; exit 77; }
 
-# 当前环境是否允许创建 socket（如沙箱限制）
+# 当前环境是否允许创建 socket（如受限容器/权限环境）
 if ! python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); s.close()' 2>/dev/null; then
     log "SKIP: 当前环境无法创建 socket"
     exit 77

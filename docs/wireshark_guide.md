@@ -203,33 +203,7 @@ screenshots/
 
 ---
 
-## 7. 常见追问
-
-### Q: "你怎么验证协议正确性？"
-
-**参考回答：**
-
-> 我用 Wireshark 做了端到端的抓包验证，分三个层面确认：
->
-> **传输层** — 先确认 TCP 三次握手正常（SYN → SYN-ACK → ACK），说明网关在 8080 端口上正确 accept 了连接。这是最基础的健康检查。
->
-> **自定义协议层** — 用 `tcp.payload contains aa:55` 过滤出所有协议帧，Follow TCP Stream 看 Hex Dump，逐字节对照 `protocol.h` 中的帧布局：偏移 0 是 `AA 55` 帧头、偏移 2 是 big-endian 长度、偏移 4 是命令字、末尾 2 字节是 CRC16。再用 `device_simulator.py` 的 `crc16()` 函数独立验算 CRC，看 Wireshark 抓到的 CRC 字段和自己的计算结果是否一致。
->
-> **业务层** — 用 `mqtt` 过滤器看 MQTT PUBLISH 报文，确认 Topic 是 `sensor/data`、QoS 是 0（符合设计意图）、Payload 中的 JSON 字段（device_id、temp、hum、gateway_time）完整且无截断。
->
-> 三层全部对得上，就说明从 TCP 接收 → 拆包 → CRC 校验 → 命令分发 → MQTT 发布这条数据链路是闭环正确的。
-
-### 追问："CRC 验算具体怎么做？"
-
-> 抓到的帧里 CRC 在最后 2 字节（big-endian）。我把帧的 [偏移2 到 末尾-2] 区域（即长度+命令+Payload）喂给 `crc16_compute()`，得到的值跟帧尾 CRC 字段比对，一致则 CRC 校验通过。Wireshark 无法直接验证自定义 CRC，这个步骤必须手工完成。
-
-### 追问："为什么用 Wireshark 而不是直接看日志？"
-
-> 日志只能看到软件说自己做了什么，Wireshark 看到的是线路上实际发了什么。如果代码里打印 "published to MQTT" 但线路上根本没有 PUBLISH 报文出去，日志就骗了你。抓包是验证的最后一道防线——它不依赖代码的自我报告。
-
----
-
-## 快速操作清单
+## 7. 快速操作清单
 
 ```bash
 # 1. 启动抓包（Linux 侧）

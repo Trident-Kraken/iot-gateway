@@ -33,7 +33,7 @@ Testing/
 # ---- 抓包文件 ----
 *.pcap
 
-# ---- AI 工具链（移出跟踪）----
+# ---- Local tooling ----
 .agents/
 .specify/
 .codex/

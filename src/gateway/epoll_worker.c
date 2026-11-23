@@ -23,7 +23,7 @@
 /* 每次 epoll_wait() 调用处理的最大事件数。*/
 #define EPOLL_MAX_EVENTS 1024
 
-/* epoll_wait 超时（毫秒，Day4 F3）：不用 -1 永久阻塞，周期性醒来轮询
+/* epoll_wait 超时（毫秒）：不用 -1 永久阻塞，周期性醒来轮询
  * g_stop_requested，保证信号处理器仅置标志（不做任何其他系统调用）
  * 也能在半个周期内触发优雅退出。 */
 #define EPOLL_POLL_TIMEOUT_MS 500
@@ -32,7 +32,7 @@
  * epoll thread reads them and performs full connection cleanup. */
 static int g_close_pipe[2] = { -1, -1 };
 
-/* 优雅停机请求标志（Day4 F3）：由 SIGTERM/SIGINT 处理器经
+/* 优雅停机请求标志：由 SIGTERM/SIGINT 处理器经
  * epoll_worker_request_stop() 置位。volatile sig_atomic_t 是信号处理器
  * 与普通代码共享标志的标准类型（单字读写原子，async-signal-safe）。 */
 static volatile sig_atomic_t g_stop_requested = 0;
@@ -59,7 +59,7 @@ struct connection {
     uint64_t  generation; /* 连接代际号：accept 时递增分配，fd 复用后用于区分。 */
     enum conn_role role;  /* 该 fd 在事件循环中的角色。 */
     /* 本事件批内是否已被 connection_close() 关闭（陈旧事件重入防护，
-     * 见 connection_close 与事件分发处的面试点注释）。对象池 acquire
+     * 见 connection_close 与事件分发处的设计说明）。对象池 acquire
      * 时的 memset 会把它清零，新连接天然为“未关闭”。 */
     int       closed;
     struct connection *next; /* singly-linked list of client connections */
@@ -73,7 +73,7 @@ static uint64_t g_generation = 0;
 
 /* 客户端连接上下文对象池：固定数组 + LIFO 空闲链。
  * 仅 epoll 线程访问（accept/connection_close 均在其上下文中），无需加锁，
- * 符合 AGENTS §2.3「只实现项目够用的连接池」。 */
+ * 在高并发连接建立/关闭关键路径上避免动态分配。 */
 static struct connection g_conn_pool[CONN_POOL_CAPACITY];
 static struct connection *g_conn_free = NULL;
 static int g_conn_pool_initialized = 0;
@@ -86,7 +86,7 @@ static int g_conn_pool_initialized = 0;
 static struct connection *g_conn_trash = NULL;
 
 /*
- * 面试点注释（对象池初始化标志与耗尽区分）：
+ * 设计说明（对象池初始化标志与耗尽区分）：
  *   绝不能用 `g_conn_free == NULL` 判断对象池是否已初始化！当 1024 个
  *   活跃连接同时存在时，`g_conn_free` 也会自然变为 NULL（池已耗尽）。
  *   若误以 `g_conn_free == NULL` 再次触发 `conn_pool_init()`，会把正在
@@ -251,7 +251,7 @@ void epoll_worker_destroy(void)
 void epoll_worker_request_stop(void)
 {
     /*
-     * 优雅停机请求（Day4 F3）：可由信号处理器调用，因此只做一次标志
+     * 优雅停机请求：可由信号处理器调用，因此只做一次标志
      * 写入，不加锁、不分配、不记日志（async-signal-safe）。事件循环经
      * epoll_wait 超时轮询读到该标志后走统一清理路径退出。
      */
@@ -357,7 +357,7 @@ static int epoll_add(int epoll_fd, int fd, struct connection *conn)
 /**
  * @brief 从 epoll 实例移除一个文件描述符并关闭它。
  *
- * 面试点注释（陈旧事件与双重释放防护）：
+ * 设计说明（陈旧事件与双重释放防护）：
  *   epoll_wait 返回的 events[] 是调用时刻的快照。同一批次内，先处理的
  *   pipe 消息（如心跳超时关闭）可能已把某连接关闭，而该连接的
  *   EPOLLIN/EPOLLHUP 事件仍留在批内后续位置。若对此类“陈旧事件”再次
@@ -436,7 +436,7 @@ static void handle_listen(int epoll_fd, int listen_fd)
             }
 
             /*
-             * 其余错误（Day4 F2）：ECONNABORTED/EPROTO 已在 server_accept
+             * 其余错误：ECONNABORTED/EPROTO 已在 server_accept
              * 内部重试排空；EMFILE/ENFILE 已通过 reserve fd 排空拒绝。
              * 到达这里即本轮 accept 结束，等待下一次 epoll 事件。
              */
@@ -679,7 +679,7 @@ int epoll_worker_run(int listen_fd)
         int nfds;
 
         /*
-         * 优雅停机检测（Day4 F3）：epoll_wait 带超时（而非 -1 永久阻塞），
+         * 优雅停机检测：epoll_wait 带超时（而非 -1 永久阻塞），
          * 每半个秒醒来轮询一次停机标志；信号处理器只置标志、不做其他
          * 系统调用，事件循环在此处统一响应。
          */
@@ -715,7 +715,7 @@ int epoll_worker_run(int listen_fd)
             }
 
             /*
-             * 面试点注释（陈旧事件防护）：
+             * 设计说明（陈旧事件防护）：
              * events[] 是 epoll_wait 时刻的快照，本批更早处理的 pipe
              * 消息可能已关闭该连接（closed=1，槽位在 trash 链待批末回收）。
              * 直接跳过，防止对已关闭连接二次 recv/close；由于槽位批内
@@ -728,7 +728,7 @@ int epoll_worker_run(int listen_fd)
             ev = events[i].events;
 
             /*
-             * 面试点注释（EPOLLIN | EPOLLHUP 同批处理顺序）：
+             * 设计说明（EPOLLIN | EPOLLHUP 同批处理顺序）：
              * 短连接客户端发完最后一帧后立刻 close，内核可能在同一事件中
              * 同时上报 EPOLLIN | EPOLLHUP。必须先处理 EPOLLIN 排空内核接收
              * 缓冲区，再检查 EPOLLERR | EPOLLHUP 执行关闭；若先关闭并 continue，
@@ -753,7 +753,7 @@ int epoll_worker_run(int listen_fd)
         }
 
         /* 本批事件全部处理完毕，统一归还批内关闭的连接槽（见
-         * connection_close 处面试点注释）。此后槽位才允许被 accept 复用。 */
+         * connection_close 处设计说明）。此后槽位才允许被 accept 复用。 */
         conn_pool_flush_trash();
     }
 

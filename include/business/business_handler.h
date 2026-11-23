@@ -43,7 +43,7 @@ typedef void (*cmd_handler_t)(int fd, uint64_t generation,
  * Payload 为 JSON 字符串，形如：
  *   {"device_id":"dev_001","temp":25.5,"hum":60,"timestamp":1718188800}
  *
- * 使用轻量字符串解析（strstr + sscanf），无需 cJSON，适合两周项目。
+ * 使用长度受限的轻量 JSON 字段解析（零第三方依赖），提取并校验字段后重打包上报至 MQTT。
  * 解析后重新打包 JSON，通过 mqtt_publish() 上报至云端。
  *
  * @param fd         来源连接的文件描述符。

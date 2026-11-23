@@ -13,7 +13,7 @@ target_link_libraries(unit_tests PRIVATE Threads::Threads)
 
 add_test(NAME unit_tests COMMAND unit_tests)
 
-# config_parser 单元测试（含 F4：行内注释剥离 + 非法 int 回退告警，
+# config_parser 单元测试（含行内注释剥离 + 非法 int 回退告警，
 # config_get_int 依赖 logger 输出告警，故一并编译 logger.c）。
 add_executable(test_config
     test_config.c

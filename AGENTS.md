@@ -1,16 +1,15 @@
 # AGENTS.md — Industrial IoT TCP Gateway
 
-本文件为 AI 编码助手提供项目背景、架构约定、编码规范与质量要求，适用于 `iot-gateway` 项目所有目录与子模块。
+本文件定义 `iot-gateway` 项目的架构边界、编码规范、并发约束与验证标准，适用于所有目录与子模块。
 
 ---
 
 ## 1. 项目概述
 
-- **项目名称**：iot-gateway（Linux 工业物联网 TCP 通信网关）
+- **项目名称**：`iot-gateway`（Linux 工业物联网 TCP 通信网关）
 - **目标平台**：Linux 用户空间，POSIX API
 - **语言与标准**：纯 C11，GCC 编译，CMake 构建
-- **交付周期**：校招/课程设计级别，两周迭代
-- **设计哲学**：半解耦 — I/O 线程与工作线程分离，但允许在关键路径上为性能做合理耦合，不追求过度抽象的通用框架
+- **设计哲学**：半解耦架构 —— I/O 线程与工作线程分离，关键路径允许为性能与确定性延迟做适当耦合，避免过度抽象
 
 ---
 
@@ -18,237 +17,132 @@
 
 ### 2.1 语言与平台
 
-- 只允许 C11 标准 C 与 POSIX API。
+- 只允许使用 C11 标准 C 与 POSIX API。
 - 禁止使用 C++ 特性：`class`、`template`、STL、`std::string`、`std::vector`、异常、RTTI。
 - 禁止使用 Windows API、Boost、libevent、libuv、ACE 等第三方事件/网络框架。
-- MQTT 协议实现允许临时依赖 **Eclipse Mosquitto 客户端库**，但必须封装在独立模块内，未来可替换为自实现。
+- MQTT 客户端允许依赖 **Eclipse Mosquitto 客户端库**，但必须封装在独立模块内，保持上层接口可替换。
 
-### 2.2 线程模型（当前事实状态）
+### 2.2 线程模型
 
 ```
-1 个 epoll I/O 线程  +  N 个工作线程（N = 2~4）
+1 个 epoll I/O 线程  +  N 个工作线程（默认 4） + 1 个心跳检测线程 + 1 个 MQTT 管理线程
 ```
 
 | 线程 | 职责范围 |
-|------|---------|
-| **epoll I/O 线程** | `accept()`、非阻塞 `recv()`、将原始字节写入该连接 `parse_ctx->rb`（每连接独立的 RingBuffer）、运行 `packet_parser` 帧解析状态机、CRC 校验、将完整帧入队到任务队列。 |
-| **工作线程** | 从任务队列取出完整帧，处理业务逻辑与上报（JSON 打包、MQTT publish、数据库/云端转发等）。 |
+|---|---|
+| **epoll I/O 线程** | `accept()`、非阻塞 `recv()`、将原始字节写入该连接 `parse_ctx->rb`（每连接独立 RingBuffer）、运行 `packet_parser` 状态机与 CRC16 校验、完整帧入队到任务队列、读取 self-pipe 执行连接关闭与下行发送。 |
+| **工作线程** | 从任务队列取出完整帧，通过函数指针表分发处理业务逻辑（JSON 解析/校验、心跳刷新、`CMD_CONFIG` 下行组帧、`mqtt_publish` 入队）。 |
+| **心跳检测线程** | 周期性遍历 `conn_manager` 链表收集超时 `(fd, generation)`，出锁后经 self-pipe 委托 epoll 线程关闭。 |
+| **MQTT 管理线程** | 维护 broker 连接、驱动 `mosquitto_loop()`（收发/keepalive/QoS1&2 inflight 重传）、断线退避重连与离线缓存冲刷。 |
 
-> **说明**：当前实现中，协议帧解析状态机和 CRC 校验均位于 epoll I/O 线程。这种设计降低了工作线程复杂度，并使坏帧在入队前即被丢弃，符合半解耦架构目标。工作线程不跑状态机。
+> 说明：协议帧解析状态机和 CRC 校验保留在 epoll I/O 线程，使工作线程专注于业务处理且坏帧在入队前即被丢弃。
 
 ### 2.3 内存管理
 
-- 禁止内存泄漏。所有 `malloc/calloc` 必须有对应的 `free`。
-- **epoll 线程关键路径**（`recv` → RingBuffer → 入队）应尽量避免动态分配。
-- epoll_worker 连接上下文（struct connection）已落地固定大小对象池（1024）、task_queue 任务节点已落地固定大小任务池（2048）；`parse_ctx`（含每连接 RingBuffer）与 `conn_entry` 在连接建立/拆除路径分配（每连接一次），`recv` → RingBuffer → 入队 热路径零动态分配；禁止实现“通用内存池”，只实现项目够用的连接池/任务池即可。
+- 禁止内存泄漏。所有 `malloc/calloc/strdup` 必须有对应释放路径。
+- **epoll 线程关键路径**（`recv` → RingBuffer → 任务入队）保持零动态分配：
+  - `epoll_worker` 连接上下文（`struct connection`）使用固定大小对象池（1024）；
+  - `task_queue` 任务节点使用固定大小任务池（2048，满则 `ENOMEM` 拒绝入队）；
+  - `parse_ctx`（含每连接 RingBuffer）与 `conn_entry` 仅在连接建立/拆除路径分配一次。
+- 不实现通用内存池，只维护上述满足项目边界的对象池。
 - 柔性数组成员仅用于 `struct packet` 等协议结构体，不得用于频繁分配的热路径。
 
 ### 2.4 全局状态
 
-- 禁止裸全局变量。
-- 模块级单例/配置状态必须使用 `static` 限定，并加注释说明为什么需要全局。
-- 配置解析器、任务队列、线程池、日志器等允许作为进程级单例存在。
+- 禁止暴露裸全局变量。
+- 模块级单例/配置状态必须使用 `static` 限定，并附注释说明作用域与同步机制。
+- 配置解析器、任务队列、线程池、日志器等进程级单例需保证启动/停机路径有序清理。
 
 ---
 
 ## 3. 项目结构
 
-必须保持以下目录布局：
+保持以下目录布局：
 
 ```
 iot-gateway/
-├── CMakeLists.txt          # 根构建脚本（project、编译选项、add_subdirectory(src)）
-├── .github/workflows/      # CI：build + ctest + 端到端集成冒烟
-├── README.md               # 项目说明与压测基准
+├── CMakeLists.txt          # 根构建脚本（C11、-Wall -Wextra、add_subdirectory）
+├── .github/workflows/      # CI：Release 构建 + CTest（单测与集成测试）
+├── README.md               # 项目说明与基准验证结果
 ├── CHANGELOG.md            # 版本变更记录
 ├── LICENSE                 # MIT License
-├── AGENTS.md               # 本文件（AI 助手必读）
-├── src/CMakeLists.txt      # 子目录构建脚本（add_executable(iot-gateway ...)）
+├── AGENTS.md               # 架构约定与编码规范
+├── src/CMakeLists.txt      # 主程序目标与源文件清单
 ├── src/                    # 实现文件 .c，按 gateway/ protocol/ business/ utils/ 分组
-├── include/                # 公共头文件 .h，与 src/ 分组镜像（gateway/ protocol/ business/ utils/）
-├── config/                 # 配置文件（gateway.ini）
-├── tests/                  # unit/（C 单测占位）+ integration/（Python 模拟器 + 压测 + CTest）
-├── tools/                  # 运维/调试辅助脚本（当前为空占位）
-├── logs/                   # 运行时日志输出目录（logger 写入）
-└── docs/                   # 架构、协议设计、部署、压测报告、Wireshark 指南、规则变更历史
+├── include/                # 公共头文件 .h，与 src/ 分组镜像
+├── config/                 # 运行时配置文件（gateway.ini）
+├── tests/                  # unit/（C 单元测试）+ integration/（Python 模拟器/压测/集成用例）
+├── tools/                  # 运维/调试辅助脚本占位
+├── logs/                   # 运行时日志输出目录
+└── docs/                   # 架构、协议、部署、测试报告、设计权衡与抓包指南
 ```
 
-当前已存在模块：
+核心模块说明：
 
 | 模块 | 头文件 | 实现 | 核心职责 |
-|------|--------|------|---------|
-| server | `include/gateway/server.h` | `src/gateway/server.c` | TCP 监听 socket 创建、bind、listen、accept |
-| epoll_worker | `include/gateway/epoll_worker.h` | `src/gateway/epoll_worker.c` | epoll ET 模式事件循环 |
-| ringbuffer | `include/utils/ringbuffer.h` | `src/utils/ringbuffer.c` | 每个连接独立的循环缓冲区 |
-| packet_parser | `include/protocol/packet_parser.h` | `src/protocol/packet_parser.c` | 二进制协议状态机拆包 |
-| protocol | `include/protocol/protocol.h` | `src/protocol/protocol.c` | 帧编码/解码/CRC16 |
-| conn_manager | `include/gateway/conn_manager.h` | `src/gateway/conn_manager.c` | 活跃连接链表、心跳时间戳维护、两段式遍历回调 |
-| heartbeat | `include/gateway/heartbeat.h` | `src/gateway/heartbeat.c` | 独立心跳线程，超时断开 |
-| task_queue | `include/utils/task_queue.h` | `src/utils/task_queue.c` | 全局线程安全任务队列 |
-| threadpool | `include/utils/threadpool.h` | `src/utils/threadpool.c` | 固定数量工作线程 |
-| config_parser | `include/utils/config_parser.h` | `src/utils/config_parser.c` | INI 配置文件解析 |
-| logger | `include/utils/logger.h` | `src/utils/logger.c` | 分级日志、日志轮转、互斥锁保护多线程写入 |
-| main | — | `src/gateway/main.c` | 初始化、启动、资源释放 |
-| business_handler | `include/business/business_handler.h` | `src/business/business_handler.c` | 工作线程入口：`g_cmd_handlers[256]` 函数指针分发表、`strstr` 轻量 JSON 解析、调用 `mqtt_publish` |
-| mqtt_client | `include/business/mqtt_client.h` | `src/business/mqtt_client.c` | libmosquitto 封装：QoS0/1/2 publish（配置 `mqtt_qos`）、管理线程驱动 mosquitto_loop、断线自动重连、有界离线缓存 |
-
-> 说明：`conn_manager` 不再持有 RingBuffer（v1.4 后所有权归 `parse_ctx`）；它在 epoll 线程被 add/remove，在心跳线程被 foreach 遍历，锁粒度仅覆盖链表操作与回调，不持有期间做 I/O。
+|---|---|---|---|
+| server | `include/gateway/server.h` | `src/gateway/server.c` | 监听 socket 创建、accept 瞬时错误重试、EMFILE reserve-fd 排空与释放 |
+| epoll_worker | `include/gateway/epoll_worker.h` | `src/gateway/epoll_worker.c` | epoll ET 事件循环、连接池（1024）、self-pipe 跨线程关闭/下行发送、陈旧事件防护 |
+| ringbuffer | `include/utils/ringbuffer.h` | `src/utils/ringbuffer.c` | 每连接独立的 SPSC 循环缓冲区 |
+| packet_parser | `include/protocol/packet_parser.h` | `src/protocol/packet_parser.c` | 五态二进制协议状态机拆包 |
+| protocol | `include/protocol/protocol.h` | `src/protocol/protocol.c` | 帧编解码与编译期表驱动 CRC16-CCITT-FALSE |
+| conn_manager | `include/gateway/conn_manager.h` | `src/gateway/conn_manager.c` | 活跃连接链表、generation 管理、两段式遍历回调 |
+| heartbeat | `include/gateway/heartbeat.h` | `src/gateway/heartbeat.c` | 独立心跳扫描线程（可中断睡眠），超时委托 epoll 线程关闭 |
+| task_queue | `include/utils/task_queue.h` | `src/utils/task_queue.c` | 线程安全有界任务队列（2048 节点对象池） |
+| threadpool | `include/utils/threadpool.h` | `src/utils/threadpool.c` | 固定数量工作线程与优雅退出 |
+| config_parser | `include/utils/config_parser.h` | `src/utils/config_parser.c` | INI 解析、行内注释剥离、超长行防护、合法范围告警 |
+| logger | `include/utils/logger.h` | `src/utils/logger.c` | 分级日志、文件大小轮转、互斥锁保护多线程写入 |
+| main | — | `src/gateway/main.c` | 配置校验、`SIGPIPE` 忽略、信号停机、严格逆序资源清理 |
+| business_handler | `include/business/business_handler.h` | `src/business/business_handler.c` | `g_cmd_handlers[256]` 分发表、长度受限 JSON 解析/校验、`CMD_CONFIG` 下行组帧 |
+| mqtt_client | `include/business/mqtt_client.h` | `src/business/mqtt_client.c` | libmosquitto 封装（QoS0/1/2）、管理线程、退避重连、有界离线缓存（512） |
 
 ---
 
 ## 4. 编码规范
 
-### 4.1 命名
+### 4.1 命名与接口
 
-- 全部使用 `snake_case`。
-- 鼓励公共 API 加模块前缀（如 `server_init`、`packet_parser_feed`、`rb_write`），但不强制统一加 `gw_` 前缀。
-- 函数名应清晰表达模块和动作，避免缩写。
+- 全部使用 `snake_case`，公共 API 鼓励带模块前缀（如 `server_init`、`packet_parser_feed`、`rb_write`）。
+- 每个 `.h` 文件必须包含 include guard 与 `extern "C"` 兼容宏。
+- 错误返回值统一：`0` 表示成功、`-1` 表示失败并设置 `errno`（或返回明确的枚举/长度语义）。
+- 头文件不暴露不必要的内部结构体布局（如 `struct parse_ctx` 使用不透明句柄）。
 
-### 4.2 函数与接口
+### 4.2 错误处理与日志
 
-- 每个 `.h` 文件必须有 include guard。
-- 错误码统一使用 `errno`，或在模块内部定义清晰的 `enum`/`int` 返回值（`-1` 表示错误，`0` 表示成功）。
-- 不允许在头文件中暴露内部数据结构细节，除非该结构体确实需要调用者直接操作。
+- 所有系统调用（`socket`、`epoll_*`、`pthread_*`、`malloc`、`pipe`、`sigaction` 等）必须检查返回值，错误路径释放半成品资源。
+- 统一使用 `logger.h` 提供的 `LOG_DEBUG` / `LOG_INFO` / `LOG_ERROR` 宏，格式 `[YYYY-MM-DD HH:MM:SS] [LEVEL] [file:line] message`。
+- 高频路径避免无条件 `INFO` 日志，防止 I/O 成为吞吐瓶颈。
 
-### 4.3 错误处理
+### 4.3 注释约定
 
-- 所有系统调用（`socket`、`epoll_*`、`pthread_*`、`malloc` 等）必须检查返回值。
-- 错误路径必须释放已分配资源，禁止半成品对象泄漏。
-- 错误日志使用 `LOG_ERROR`，禁止静默吞错。
-
-### 4.4 日志
-
-- 统一使用 `logger.h` 提供的宏：
-  - `LOG_DEBUG(fmt, ...)`
-  - `LOG_INFO(fmt, ...)`
-  - `LOG_ERROR(fmt, ...)`
-- 日志格式：`[YYYY-MM-DD HH:MM:SS] [LEVEL] [file:line] message`
-- 支持运行时级别开关，从 `config/gateway.ini` 的 `log_level` 读取。
-- 禁止在 `LOG_DEBUG` 中使用高开销计算，生产环境可关闭 DEBUG。
-
-### 4.5 注释
-
-- 函数头保留 AI 生成的原有注释风格（Doxygen 块注释 `/** ... */`）。
-- 只在以下 5 个深水区模块补充“面试点注释”，帮助开发者亲手理解核心机制：
-  1. **epoll_worker**：ET 模式、`EAGAIN` 循环、`EPOLLET` 注册、连接清理。
-  2. **packet_parser**：粘包/拆包状态机、逐字节消费、`temp_buf` 边界防御、`rb_write` 背压。
-  3. **threadpool**：工作线程循环、条件变量 `while` 等待、优雅退出、`g_running` 标志。
-  4. **ringbuffer**：循环覆盖策略、head/tail/len 一致性、单生产者-单消费者前提。
-  5. **business_handler**：完整帧到业务对象的转换、JSON 打包、MQTT publish 流程、错误重传策略。
+- 公共函数与模块头部保持 Doxygen 块注释（`/** ... */`）。
+- 在 5 个关键模块（`epoll_worker`、`packet_parser`、`threadpool`、`ringbuffer`、`business_handler`）的核心并发/状态机逻辑处补充“设计说明”注释，阐明并发假设、锁范围与边界防御理由。
 
 ---
 
-## 5. 模块级特殊要求
+## 5. 模块级约束
 
-### 5.1 RingBuffer
-
-- 每个 TCP 连接必须拥有独立 RingBuffer，禁止多连接共享。
-- RingBuffer 由 `struct parse_ctx`（packet_parser）持有，不存放在 `conn_entry` 中。
-- `packet_parser_register()` 创建并初始化 RingBuffer，`packet_parser_unregister()` 释放。
-- `conn_entry` 仅维护 fd、心跳时间戳和链表指针，不持有缓冲区。
-
-### 5.2 epoll_worker
-
-- 必须使用 **ET（边缘触发）** 模式。
-- `listen_fd` 和每个 `client_fd` 都必须设为非阻塞。
-- ET 模式下必须 `while` 循环 `accept` / `recv` 直到 `EAGAIN`。
-- 连接关闭、异常、`EPOLLERR` / `EPOLLHUP` 必须统一走 `connection_close()` 清理。
-
-### 5.3 packet_parser
-
-- 状态机状态：`WAIT_HEAD → WAIT_LEN → WAIT_PAYLOAD → WAIT_CRC → FRAME_COMPLETE`。
-- 必须逐字节消费 RingBuffer，处理粘包/拆包三种场景。
-- `temp_buf` 必须有运行时 `sizeof(ctx->temp_buf)` 边界检查，作为 `PARSER_MAX_PAYLOAD_LEN` 之后的最后一道防线。
-- `rb_write()` 返回值必须检查，RingBuffer 满时不得静默丢帧；应重置状态机并返回错误，由上层关闭连接。
-
-### 5.4 任务队列与线程池
-
-- 任务队列使用 `pthread_mutex_t + pthread_cond_t`。
-- `task_queue_pop()` 必须使用 `while` 循环判断队列非空，防止伪唤醒。
-- 线程池优雅退出：设置运行标志位 → `pthread_cond_broadcast()` → `pthread_join()`。
-- 工作线程处理任务时禁止直接阻塞 I/O。
-
-### 5.5 business_handler & mqtt_client
-
-- `business_handler`：工作线程取任务后按 `task->frame[4]` 提取命令字，查 `g_cmd_handlers[256]` 函数指针表 O(1) 分发；未注册命令记 `LOG_ERROR` 并丢帧（当前注册 3/256：`CMD_SENSOR_DATA`、`CMD_HEARTBEAT`、`CMD_CONFIG`）。
-- JSON 解析使用 `strstr`+`snprintf` 手写（`json_extract()`），不引入 cJSON；重打包后用 `mqtt_publish` 上报 `sensor/data`。
-- `CMD_CONFIG`（0x03）为请求/响应式下行：设备发配置请求 → 网关回 `0x03` 帧（默认设备配置 JSON）。下行帧经 self-pipe 委托 epoll 线程发送（fd + generation 双重匹配，best-effort，可重发）。
-- `mqtt_client`：静态单例 `g_mqtt` + `pthread_mutex_t` 封装 libmosquitto；单一 MQTT 管理线程驱动 `mosquitto_loop()`（收发/PINGREQ/keepalive/断线重连）；publish QoS 由配置 `mqtt_qos` 决定（0/1/2，默认 0），**不阻塞工作线程**。
-- 离线缓存：broker 不可达或 publish 失败时消息进入有界环形缓存（`MQTT_CACHE_MAX`=512，满淘汰最旧），管理线程重连成功后锁外冲刷，不再 fast-fail 丢消息。
-- QoS1/2 的确认与重传由 `mosquitto_loop()` 的 inflight 机制处理，`on_publish` 回调记录每次 PUBACK/PUBCOMP。
-- 禁止直接阻塞 I/O，所有网络发布必须是非阻塞或交给独立发布线程。
+- **RingBuffer**：每连接独立，由 `parse_ctx` 持有，SPSC 无锁前提下仅在 epoll 线程读写；满时拒绝覆盖并返回实际写入字节，由上层断开连接防止静默丢帧。
+- **epoll_worker**：强制 `EPOLLET` + 非阻塞 fd，循环 `accept`/`recv` 至 `EAGAIN`；先处理 `EPOLLIN` 再处理 `EPOLLERR | EPOLLHUP`；同批陈旧事件通过 `closed` 标志与 `g_conn_trash` 批末归还防护；`struct pipe_msg` 编译期断言 `<= PIPE_BUF`。
+- **packet_parser**：`WAIT_HEAD → WAIT_LEN → WAIT_PAYLOAD → WAIT_CRC → FRAME_COMPLETE`，同时校验 `PARSER_MAX_PAYLOAD_LEN` 与 `sizeof(ctx->temp_buf)` 双重边界。
+- **task_queue & threadpool**：`task_queue_pop()` 必须用 `while` 循环防虚假唤醒；退出顺序为 `g_running = 0` → `task_queue_shutdown()`（`pthread_cond_broadcast`）→ `pthread_join()`；工作线程禁止直接阻塞客户端 fd。
+- **business_handler & mqtt_client**：工作线程仅对内存/队列操作，网络发送经由 `mqtt_client` 管理线程或 `epoll_worker` self-pipe；**严禁任何模块在持有互斥锁期间执行阻塞网络或磁盘 I/O**。
 
 ---
 
-## 6. 构建与验证
-
-### 6.1 构建命令
+## 6. 构建、测试与开发注意事项
 
 ```bash
+# Release 构建与全量测试
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build
+ctest --test-dir build --output-on-failure
+
+# Sanitizer 验证（ASan+LSan / TSan）
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DCMAKE_C_FLAGS="-Wall -Wextra -fsanitize=address -fno-omit-frame-pointer -g -O1"
+cmake --build build && ASAN_OPTIONS=detect_leaks=1 ctest --test-dir build --output-on-failure
 ```
 
-Debug 模式：
-
-```bash
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
-cmake --build build
-```
-
-### 6.2 编译选项
-
-根 `CMakeLists.txt` 应保持：
-
-```cmake
-set(CMAKE_C_STANDARD 11)
-set(CMAKE_C_STANDARD_REQUIRED ON)
-set(CMAKE_C_EXTENSIONS OFF)
-set(CMAKE_C_FLAGS "-Wall -Wextra")
-```
-
-> 说明：启用 `-Wall -Wextra` 暴露潜在问题，但不强制 `-Werror`。交付前应保证零错误，允许存在不影响正确性的警告。
-
-### 6.3 验证方式
-
-- 手动运行 `./build/src/iot-gateway`，检查日志输出与端口监听。
-- 使用 `nc` 或自定义客户端发送协议帧，验证拆包、CRC、心跳超时、任务队列消费。
-- 可选：使用 `valgrind --leak-check=full` 检查内存泄漏（若环境允许）。
-
----
-
-## 7. 当前已知技术债（按优先级）
-
-1. **命名前缀不统一**：`gw_` 前缀未强制推行，当前函数名风格混杂，后续视时间决定是否统一。
-2. **关键路径动态分配（已解决）**：epoll_worker 连接上下文与任务节点已改为固定大小对象池（连接池 1024、任务池 2048，见 §2.3），`recv → 入队` 热路径零动态分配；`parse_ctx`/`conn_entry` 仍为每连接一次分配（连接建立/拆除路径）；任务队列随之从无界链表变为有界（满则拒绝入队）。
-3. **MQTT 已达成最小可用**：`mqtt_client` 实现 QoS0/1/2 publish（配置 `mqtt_qos`）+ 管理线程驱动 `mosquitto_loop()` + 断线自动重连 + 有界离线消息缓存（重连后冲刷）；`business_handler` 已接通 `CMD_SENSOR_DATA`/`CMD_HEARTBEAT`/`CMD_CONFIG`（3/256 handler，含请求/响应式配置下行）。待补项：QoS1/2 显式重传策略与离线消息持久化（当前缓存仅内存、进程重启即丢）、下行配置的真实数据源（当前回发固定默认 JSON）。
-
----
-
-## 8. 质量检查清单（提交前必做）
-
-- [ ] `cmake --build build` 在 `-Wall -Wextra` 下零错误通过。
-- [ ] 手动运行网关，确认监听端口、日志输出正常。
-- [ ] 新增函数均有基本注释。
-- [ ] 新增系统调用均检查返回值。
-- [ ] 新增动态内存均有释放路径。
-- [ ] 多线程模块使用 `static` 单例并说明原因。
-- [ ] 没有引入新的第三方网络/事件库。
-
----
-
-## 9. 变更日志
-
-> 规则修订历史已抽到 [docs/rule_history.md](docs/rule_history.md)，避免每次 AGENTS.md 加载都把 60+ 行历史塞进上下文。追溯某条规则的来源、或对某条规则存疑时查该文件。
-
-当前最新：**v1.7**（新增 CI workflow、统一源文件编码为 UTF-8）。v1.0~v1.7 详见 rule_history.md。
-
----
-
-## 10. 给 AI 助手的快速指引
-
-仅列**项目独有**、未在正文/全局 AGENTS.md 重复的几条，其余通用原则（先读项目、最小改动、显式错误处理等）不在此复述。
-
-- 新增模块时先更新 `src/CMakeLists.txt`（`add_executable(iot-gateway …)` 的源清单在此，不在根 CMakeLists.txt）。
-- 涉及多线程时，先画清楚锁的持有范围，**禁止在持锁期间做 I/O**（`conn_manager_foreach` 回调、`g_mqtt.lock`、`task_queue` 锁均严守此界）。
-- 修改 `epoll_worker` / `packet_parser` / `threadpool` / `ringbuffer` / `business_handler` 五个深水区模块后，在关键逻辑处补"面试点注释"（见 §4.5）。
+- 根 `CMakeLists.txt` 保持 `CMAKE_C_STANDARD 11`、`CMAKE_C_EXTENSIONS OFF`、`-Wall -Wextra`，提交前要求零编译错误零警告。
+- 新增实现文件需同步更新 `src/CMakeLists.txt`，新增单元测试需同步更新 `tests/unit/CMakeLists.txt`。
+- 使用 POSIX 特性（如 `sigaction`、`strdup`、`rand_r`、`PIPE_BUF`、`nanosleep`）的 `.c` 文件顶部须显式定义 `#define _POSIX_C_SOURCE 200809L`。

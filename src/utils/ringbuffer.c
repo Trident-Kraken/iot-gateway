@@ -40,8 +40,7 @@ size_t rb_write(ringbuffer_t *rb, const void *data, size_t len)
     /*
      * 满则拒绝：只写入当前可用空间，绝不覆盖尚未被解析器消费的旧数据。
      * 空间不足时返回实际写入字节数（< len），由上层（packet_parser）决定
-     * 重置状态机并关闭连接，避免静默丢帧（AGENTS.md §5.3）。
-     */
+     * 重置状态机并关闭连接，避免静默丢帧。 */
     if (len > rb_free(rb)) {
         len = rb_free(rb);
     }

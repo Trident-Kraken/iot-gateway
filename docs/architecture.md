@@ -25,7 +25,8 @@
                             │    threadpool (2-4 个工作线程)             │
                             │  → business_handler 命令分发表             │
                             │    ├─ 0x01 sensor_data  → JSON → MQTT     │
-                            │    └─ 0x02 heartbeat    → 刷新活跃时间     │
+                            │    ├─ 0x02 heartbeat    → 刷新活跃时间     │
+                            │    └─ 0x03 config       → 下行配置响应     │
                             └──────────────────┬────────────────────────┘
                                                │ mqtt_publish (QoS 0/1/2，可配置)
                                                ▼
@@ -66,7 +67,7 @@
 
 心跳超时清理链路：heartbeat 线程扫描连接链表 → 持锁收集超时 fd → 出锁后写 self-pipe → epoll 线程读 self-pipe → `connection_close()` 执行完整清理（epoll_ctl DEL → parser_unregister → conn_manager_remove → close → 归还连接对象池）。心跳线程不直接 close fd，避免与 epoll 线程的 I/O 操作竞争。
 
-**陈旧事件防护（Day4 P0 修复）**：`epoll_wait` 返回的 events[] 是调用时刻的快照，同一事件批内，先处理的 pipe 关闭消息可能已清理某连接，而该连接的事件仍留在批内后续位置。防护分两层：`connection.closed` 标志阻止重入清理；被关闭的槽位挂入 `g_conn_trash` 链，**批末**才归还对象池——保证批内槽位绝不被 accept 复用，陈旧事件即使到达也只能看到 `closed=1` 被跳过。回归用例：`integration_stale_event_race`（心跳超时边界 churn + 下行回显金丝雀）。
+**陈旧事件防护**：`epoll_wait` 返回的 events[] 是调用时刻的快照，同一事件批内，先处理的 pipe 关闭消息可能已清理某连接，而该连接的事件仍留在批内后续位置。防护分两层：`connection.closed` 标志阻止重入清理；被关闭的槽位挂入 `g_conn_trash` 链，**批末**才归还对象池——保证批内槽位绝不被 accept 复用，陈旧事件即使到达也只能看到 `closed=1` 被跳过。回归用例：`integration_stale_event_race`（心跳超时边界 churn + 下行回显金丝雀）。
 
 下行发送链路：self-pipe 除关闭请求外还承载**下行数据帧**（`PIPE_MSG_SEND`，如 `CMD_CONFIG` 配置响应）。工作线程的 `handle_config()` 编码帧后调用 `epoll_worker_request_send(fd, generation, frame, len)`，epoll 线程按 fd + generation 双重匹配确认连接仍是同一代，再非阻塞 `send()`（`MSG_NOSIGNAL`）。所有对客户端 fd 的 I/O 依旧收敛在 epoll 线程，工作线程只写 pipe，避免多线程并发读写同一 socket 与 fd 复用竞态。
 
@@ -105,7 +106,7 @@ mqtt_client.lock   →  publish 状态检查 + 离线缓存入队 (快速持锁)
 logger.lock        →  fprintf + fflush + 轮转检查 (每次日志写入持有)
 ```
 
-## 4. 停机生命周期（Day4 F3）
+## 4. 停机生命周期
 
 `SIGTERM` / `SIGINT` 触发优雅停机，全程不使用非 async-signal-safe 调用：
 

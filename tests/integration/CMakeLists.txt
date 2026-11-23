@@ -70,7 +70,7 @@ add_test(
 set_tests_properties(integration_fault_injection
                      PROPERTIES TIMEOUT 120 SKIP_RETURN_CODE 77)
 
-# 超时关闭竞态 churn（Day4 P0 修复回归）：心跳超时边界突发数据/断连，
+# 超时关闭竞态 churn 回归：心跳超时边界突发数据/断连，
 # 每轮以 CMD_CONFIG 下行回显验证连接池/连接链表完整性（端口 8083）。
 add_test(
     NAME integration_stale_event_race
@@ -79,7 +79,7 @@ add_test(
 set_tests_properties(integration_stale_event_race
                      PROPERTIES TIMEOUT 90 SKIP_RETURN_CODE 77)
 
-# fd 耗尽处理（Day4 F2 回归）：低 ulimit 网关 + 120 连接风暴，
+# fd 耗尽处理回归：低 ulimit 网关 + 120 连接风暴，
 # 断言耗尽期新连接被及时拒绝（EMFILE reserve-fd 排空）且释放后完全恢复
 # （端口 8084）。
 add_test(

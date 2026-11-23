@@ -44,7 +44,7 @@ void epoll_worker_request_close(int fd, uint64_t generation);
 /**
  * @brief Request the epoll event loop to exit gracefully.
  *
- * Async-signal-safe（Day4 F3）：仅做一次标志写入，可在 SIGTERM/SIGINT
+ * Async-signal-safe：仅做一次标志写入，可在 SIGTERM/SIGINT
  * 信号处理器中直接调用（不加锁、不分配、不记日志）。事件循环通过
  * epoll_wait 超时轮询读到标志后，处理完当前事件批次、关闭全部存活
  * 客户端连接（统一 connection_close 清理路径），epoll_worker_run()
@@ -77,7 +77,7 @@ int epoll_worker_request_send(int fd, uint64_t generation,
  * @brief 运行边缘触发（ET）模式的 epoll 事件循环。
  *
  * 本函数阻塞运行直到：收到优雅停机请求（epoll_worker_request_stop()，
- * 返回 0，Day4 F3）或发生致命错误（返回 -1）。它使用 epoll ET（边缘触发）
+ * 返回 0）或发生致命错误（返回 -1）。它使用 epoll ET（边缘触发）
  * 模式处理监听 socket 和所有已接受的客户端 socket。
  *
  * ET 模式行为：

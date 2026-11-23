@@ -17,7 +17,7 @@
 #define SERVER_LISTEN_BACKLOG 128
 
 /*
- * reserve fd（Day4 F2）：进程 fd 耗尽（EMFILE/ENFILE）时的"救急"描述符。
+ * reserve fd：进程 fd 耗尽（EMFILE/ENFILE）时的"救急"描述符。
  * accept() 失败 EMFILE 时积压连接仍留在 backlog，ET 模式只在队列
  * 空→非空跳变时通知，backlog 不清空监听 fd 就永远等不到新事件
  * （新设备全部无声挂起）。临时关闭 reserve fd 换取一个可用 fd，
@@ -73,8 +73,8 @@ int server_init(uint16_t port)
         return -1;
     }
 
-    /* 打开 reserve fd（Day4 F2）：失败仅告警——极少数环境无 /dev/null
-     * 时退化为旧的"EMFILE 即停止 accept"行为。先防重入泄漏旧描述符。 */
+    /* 打开 reserve fd：失败仅告警——极少数环境无 /dev/null
+     * 时退化为"EMFILE 即停止 accept"行为。先防重入泄漏旧描述符。 */
     if (g_reserve_fd >= 0) {
         close(g_reserve_fd);
         g_reserve_fd = -1;
@@ -101,7 +101,7 @@ void server_close(int listen_fd)
 }
 
 /*
- * EMFILE/ENFILE 时的 backlog 排空拒绝（Day4 F2，见 g_reserve_fd 注释）。
+ * EMFILE/ENFILE 时的 backlog 排空拒绝（见 g_reserve_fd 注释）。
  * 释放 reserve fd → 循环 accept 并立即 close（明确拒绝，客户端马上感知
  * 连接被关闭而非无声挂起）→ 排空后补开 reserve fd。
  */
@@ -167,7 +167,7 @@ int server_accept(int listen_fd)
 
             if (errno == ECONNABORTED || errno == EPROTO) {
                 /*
-                 * 瞬时错误（Day4 F2）：该连接在 accept 前已被对端放弃，
+                 * 瞬时错误：该连接在 accept 前已被对端放弃，
                  * 内核已把它移出队列，队列后方可能还有待处理连接。
                  * 必须继续 accept 而不是跳出：ET 模式下若 backlog
                  * 未排空，监听 fd 不会再触发新事件，剩余连接会被饿死。
@@ -182,7 +182,7 @@ int server_accept(int listen_fd)
 
             if (errno == EMFILE || errno == ENFILE) {
                 /*
-                 * fd 耗尽（Day4 F2）：排空并拒绝积压连接，防止监听 fd
+                 * fd 耗尽：排空并拒绝积压连接，防止监听 fd
                  * 在 ET 模式下被永久饿死。排空后恢复 errno，由调用方
                  * 结束本轮 accept 循环。
                  */

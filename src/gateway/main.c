@@ -23,7 +23,7 @@
 #define DEFAULT_LOG_PATH    "logs/gateway.log"
 
 /*
- * 收到的停机信号编号（Day4 F3）：volatile sig_atomic_t 是信号处理器与
+ * 收到的停机信号编号：volatile sig_atomic_t 是信号处理器与
  * main 之间共享标志的标准写法。仅用于退出后的日志说明。
  */
 static volatile sig_atomic_t g_signal_num = 0;
@@ -236,7 +236,7 @@ int main(int argc, char *argv[])
     LOG_INFO("server listening on port %d", server_port);
 
     /*
-     * 安装停机信号处理器（Day4 F3）：必须在 epoll_worker_run() 之前，
+     * 安装停机信号处理器：必须在 epoll_worker_run() 之前，
      * 处理器仅置标志，由事件循环超时轮询感知并优雅退出。
      */
     if (install_shutdown_handlers() != 0) {
@@ -244,7 +244,7 @@ int main(int argc, char *argv[])
         return EXIT_FAILURE;
     }
 
-    /* 阻塞运行：优雅停机返回 0（Day4 F3），致命 epoll 错误返回 -1。 */
+    /* 阻塞运行：优雅停机返回 0，致命 epoll 错误返回 -1。 */
     int rc = epoll_worker_run(listen_fd);
 
     if (rc == 0) {

@@ -50,7 +50,7 @@ void rb_destroy(ringbuffer_t *rb);
  *
  * 满则拒绝：仅写入当前可用空间，不覆盖未消费的旧数据。若空间不足，返回
  * 实际写入的字节数（可能小于 len），由调用方决定如何处理（例如 packet_parser
- * 会重置状态机并向上层报错以关闭连接，避免静默丢帧，见 AGENTS.md §5.3）。
+ * 会重置状态机并向上层报错以关闭连接，避免静默丢帧）。
  *
  * @param rb   RingBuffer 句柄。
  * @param data 待写入的数据。

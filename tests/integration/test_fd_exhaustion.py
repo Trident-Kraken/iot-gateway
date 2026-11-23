@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-fd 耗尽（EMFILE）处理集成测试（Day4 F2 回归，自带低 ulimit 网关实例）：
+fd 耗尽（EMFILE）处理集成测试（自带低 ulimit 网关实例）：
 
   通过 preexec_fn 把网关的 RLIMIT_NOFILE 压到 96，再发起 120 个并发连接：
   1. fd 耗尽期间网关必须存活；

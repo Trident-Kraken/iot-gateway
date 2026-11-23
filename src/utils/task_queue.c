@@ -16,7 +16,7 @@ struct task_node {
 };
 
 /* 任务节点对象池：固定数组 + LIFO 空闲链（g_mutex 保护）。
- * epoll 线程 push / 工作线程 pop 均零动态分配，符合 AGENTS §2.3。 */
+ * epoll 线程 push / 工作线程 pop 均零动态分配，控制热路径延迟。 */
 static struct task_node   g_task_pool[TASK_POOL_CAPACITY];
 static struct task_node  *g_free_nodes = NULL;
 

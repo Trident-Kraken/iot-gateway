@@ -4,7 +4,7 @@
   A. 心跳超时断开：设备发送一帧后静默，网关应在超时窗口内关闭连接
   B. 半包后断开：发送不完整帧后直接 close，网关应存活且可继续 accept
   C. 重复连接清理：多次连接/断开后 fd 数量保持稳定（无泄漏）
-  D. SIGTERM 优雅退出（Day4 F3）：停机信号后清理路径可达，退出码 0
+  D. SIGTERM 优雅退出：停机信号后清理路径可达，退出码 0
 
 退出码：0 通过；1 失败；77 环境不满足（跳过）。
 """
@@ -164,7 +164,7 @@ def main() -> int:
               baseline >= 0 and after >= 0 and after <= baseline + 5,
               f"(baseline={baseline}, after={after})")
 
-        # --- D. SIGTERM 优雅退出（Day4 F3）---
+        # --- D. SIGTERM 优雅退出 ---
         # 停机信号后：事件循环超时轮询感知 → 关闭全部连接 → main 走完
         # 逆序清理（心跳/线程池/MQTT/conn_manager/logger/config）→ exit 0。
         gw.send_signal(signal.SIGTERM)

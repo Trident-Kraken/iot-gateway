@@ -2,12 +2,12 @@
  * @file mqtt_client.c
  * @brief 基于 libmosquitto 的轻量 MQTT 发布客户端。
  *
- * 设计约束（见 AGENTS.md §2.1、§5.5）：
+ * 设计约束：
  *   - MQTT 协议实现封装在独立模块内，未来可替换为自实现。
- *   - 只实现 publish，不实现 subscribe（不过度设计）。
+ *   - 只实现 publish，不实现 subscribe。
  *   - 使用静态单例 + 互斥锁保证多工作线程并发 publish 的安全。
  *
- * 线程模型（v1.7 重构）：
+ * 线程模型：
  *   - 单一「MQTT 管理线程」负责连接、mosquitto_loop() 网络驱动（收发、
  *     PINGREQ/keepalive）与断线自动重连（带退避）。
  *   - 工作线程的 mqtt_publish() 只做 QoS0 入队，快速返回（fast-fail），
