@@ -178,13 +178,21 @@ def main() -> int:
               baseline >= 0 and after >= 0 and after <= baseline + 5,
               f"(baseline={baseline}, after={after})")
 
-        # --- D. SIGUSR1 实时指标 + SIGTERM 优雅退出 ---
-        gw.send_signal(signal.SIGUSR1)
-        time.sleep(0.2)
-        check("D1. SIGUSR1 后网关进程保持存活", gw.poll() is None)
+        # --- D. SIGUSR1 实时指标（via gateway_stats.sh） + SIGTERM 优雅退出 ---
+        log_path = os.path.join(tmp, "logs", "gateway.log")
+        stats_script = os.path.join(ROOT, "tools", "gateway_stats.sh")
+        stats_res = subprocess.run(
+            ["bash", stats_script, str(gw.pid), log_path],
+            capture_output=True, text=True, timeout=5,
+        )
+        check("D1. gateway_stats.sh 触发 SIGUSR1 并采集快照且进程存活",
+              stats_res.returncode == 0
+              and "stats[sigusr1]:" in stats_res.stdout
+              and gw.poll() is None,
+              f"(rc={stats_res.returncode})")
 
-        # 停机信号后：事件循环超时轮询感知 → 关闭全部连接 → main 走完
-        # 逆序清理（心跳/线程池/MQTT/conn_manager/logger/config）→ exit 0。
+        # 停机信号后：信号处理器置位停机标志 → 唤醒 epoll_wait → 关闭全部连接
+        # → main 走完逆序清理（心跳/线程池/MQTT/conn_manager/logger/config）→ exit 0。
         gw.send_signal(signal.SIGTERM)
         try:
             exit_code = gw.wait(timeout=15)
@@ -193,7 +201,6 @@ def main() -> int:
         check("D2. SIGTERM 后网关优雅退出 (exit=0)",
               exit_code == 0, f"(exit={exit_code})")
 
-        log_path = os.path.join(tmp, "logs", "gateway.log")
         try:
             with open(log_path) as lf:
                 log_text = lf.read()

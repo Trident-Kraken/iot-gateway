@@ -1,6 +1,7 @@
 #define _POSIX_C_SOURCE 200809L /* sigaction */
 
 #include <errno.h>
+#include <pthread.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -131,6 +132,26 @@ static int install_shutdown_handlers(void)
     return 0;
 }
 
+static int set_async_signals_blocked(int block)
+{
+    sigset_t set;
+    int rc;
+
+    sigemptyset(&set);
+    sigaddset(&set, SIGTERM);
+    sigaddset(&set, SIGINT);
+    sigaddset(&set, SIGUSR1);
+
+    rc = pthread_sigmask(block ? SIG_BLOCK : SIG_UNBLOCK, &set, NULL);
+    if (rc != 0) {
+        LOG_ERROR("failed to %s async signals: %s",
+                  block ? "block" : "unblock", strerror(rc));
+        return -1;
+    }
+
+    return 0;
+}
+
 /*
  * 按初始化严格逆序销毁全部已启动模块（各模块 destroy 均幂等）：
  *   1. heartbeat_stop() / threadpool_destroy()：先停掉所有仍可能向
@@ -254,6 +275,19 @@ int main(int argc, char *argv[])
              heartbeat_timeout, log_level_str, mqtt_broker, mqtt_port,
              mqtt_qos);
 
+    /*
+     * 在创建任何后台线程（MQTT/线程池/心跳）前屏蔽异步信号并安装处理器，
+     * 使子线程全部继承屏蔽掩码，仅主线程（epoll I/O 线程）在进入事件循环前
+     * 解除屏蔽，确保 SIGTERM/SIGINT/SIGUSR1 固定唤醒 epoll_wait。
+     */
+    if (set_async_signals_blocked(1) != 0 ||
+        install_shutdown_handlers() != 0) {
+        cleanup_gateway(-1);
+        return EXIT_FAILURE;
+    }
+
+    epoll_worker_set_stats_hook(handle_stats_hook);
+
     /* 初始化命令分发表（必须在工作线程启动前完成）。*/
     cmd_handlers_init();
 
@@ -297,16 +331,10 @@ int main(int argc, char *argv[])
 
     LOG_INFO("server listening on port %d", server_port);
 
-    /*
-     * 安装停机信号处理器：必须在 epoll_worker_run() 之前，
-     * 处理器仅置标志，由事件循环超时轮询感知并优雅退出。
-     */
-    if (install_shutdown_handlers() != 0) {
+    if (set_async_signals_blocked(0) != 0) {
         cleanup_gateway(listen_fd);
         return EXIT_FAILURE;
     }
-
-    epoll_worker_set_stats_hook(handle_stats_hook);
 
     /* 阻塞运行：优雅停机返回 0，致命 epoll 错误返回 -1。 */
     int rc = epoll_worker_run(listen_fd);

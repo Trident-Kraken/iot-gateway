@@ -277,6 +277,7 @@ int epoll_worker_init(void)
 {
     conn_pool_init();
     g_stop_requested = 0;
+    g_stats_requested = 0;
 
     if (g_close_pipe[0] != -1) {
         return 0; /* already initialized */
@@ -798,15 +799,15 @@ int epoll_worker_run(int listen_fd)
          * 每半个秒醒来轮询一次停机标志；信号处理器只置标志、不做其他
          * 系统调用，事件循环在此处统一响应。
          */
-        if (g_stop_requested) {
-            break;
-        }
-
         if (g_stats_requested) {
             g_stats_requested = 0;
             if (g_stats_hook != NULL) {
                 g_stats_hook();
             }
+        }
+
+        if (g_stop_requested) {
+            break;
         }
 
         nfds = epoll_wait(epoll_fd, events, EPOLL_MAX_EVENTS,

@@ -27,8 +27,24 @@ if [ -d "/proc/$PID/fd" ]; then
     echo "OpenFDs:	${FD_COUNT}"
 fi
 
+count_sigusr1() {
+    local c
+    c="$(grep -c 'stats\[sigusr1\]:' "$1" 2>/dev/null || true)"
+    echo "${c:-0}"
+}
+
+PREV_STATS="$(count_sigusr1 "$LOG_PATH")"
 kill -USR1 "$PID"
-sleep 0.15
+
+for _ in $(seq 1 20); do
+    if [ -f "$LOG_PATH" ]; then
+        CUR_STATS="$(count_sigusr1 "$LOG_PATH")"
+        if [ "$CUR_STATS" -gt "$PREV_STATS" ]; then
+            break
+        fi
+    fi
+    sleep 0.05
+done
 
 if [ -f "$LOG_PATH" ]; then
     echo "=== Latest Gateway Stats ($LOG_PATH) ==="
