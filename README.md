@@ -11,7 +11,7 @@
 - **自定义二进制协议**：帧头 `0xAA55` | 长度(BE) | 命令字 | Payload | CRC16-CCITT-FALSE，状态机拆包处理粘包/拆包
 - **函数指针分发表**：`g_cmd_handlers[256]` O(1) 命令分发，注册新命令无需修改分发骨架
 - **MQTT 可靠上报**：管理线程驱动 `mosquitto_loop`（QoS 0/1/2 可配置）+ 断线退避重连 + 有界离线缓存（512 条，重连后冲刷）
-- **优雅停机**：SIGTERM/SIGINT → 关闭全部连接 → 逆序清理全部资源 → exit 0
+- **优雅停机与可观测性**：`SIGTERM`/`SIGINT` → 关闭全部连接 → 逆序清理全部资源 → exit 0；支持 `SIGUSR1` 输出全链路运行时统计快照与 `tools/gateway_stats.sh` 运维诊断
 - **压测验证**：Python asyncio 压测脚本，支持可配置并发连接数与发送频率
 
 ## 技术栈
@@ -166,7 +166,7 @@ iot-gateway/
 ├── tests/
 │   ├── unit/                   # C 单元测试（协议/环形缓冲/状态机）
 │   └── integration/            # Python 设备模拟器 + 压测脚本 + CTest 自检用例
-├── tools/                      # 运维/调试辅助脚本占位
+├── tools/                      # 运维/调试辅助脚本（gateway_stats.sh 运行时指标快照）
 ├── docs/                       # 架构、协议设计、部署、压测报告、Wireshark 指南等
 ├── logs/                       # 运行时日志（已 gitignore）
 └── build/                      # CMake 构建产物（已 gitignore）

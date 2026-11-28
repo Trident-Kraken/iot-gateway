@@ -1,6 +1,7 @@
 #include "protocol/packet_parser.h"
 
 #include <errno.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -75,6 +76,11 @@ struct parse_ctx {
  *    WAIT_HEAD 将部分帧头字节保存在 temp_buf 中。如果第一个段只到达
  *    0xAA，解析器留在 WAIT_HEAD；下一个段提供 0x55 后解析继续。
  */
+
+/* 解析器统计计数器（仅 epoll 线程自增，relaxed 原子保证任意线程无竞争读取）。 */
+static atomic_uint_fast64_t g_frames_ok  = 0;
+static atomic_uint_fast64_t g_crc_errors = 0;
+static atomic_uint_fast64_t g_len_errors = 0;
 
 /* 解析器上下文哈希表桶数（2 的幂，与连接池容量匹配）。 */
 #define PARSER_HASH_BUCKETS 1024u
@@ -248,6 +254,8 @@ static int parser_consume_byte(struct parse_ctx *ctx, uint8_t byte)
            if (ctx->expected_len > PARSER_MAX_PAYLOAD_LEN) {
                 LOG_ERROR("parser: fd=%d excessive payload len %u, reset",
                           ctx->fd, (unsigned int)ctx->expected_len);
+                atomic_fetch_add_explicit(&g_len_errors, 1,
+                                          memory_order_relaxed);
                parser_reset(ctx);
                break;
             }
@@ -283,6 +291,7 @@ static int parser_consume_byte(struct parse_ctx *ctx, uint8_t byte)
             }
 
             LOG_ERROR("parser: fd=%d CRC mismatch, drop frame", ctx->fd);
+            atomic_fetch_add_explicit(&g_crc_errors, 1, memory_order_relaxed);
             parser_reset(ctx);
         }
         break;
@@ -307,6 +316,7 @@ static void parser_deliver_frame(struct parse_ctx *ctx)
         return;
     }
 
+    atomic_fetch_add_explicit(&g_frames_ok, 1, memory_order_relaxed);
     frame_len = 4u + 1u + ctx->expected_len + 2u;
     on_frame_complete(ctx->fd, ctx->temp_buf, frame_len);
 
@@ -327,14 +337,60 @@ static void parser_run(struct parse_ctx *ctx)
 
     while (rb_used(&ctx->rb) > 0) {
         /*
-         * 设计说明（PAYLOAD 阶段批量拷贝）：
-         *   WAIT_HEAD / WAIT_LEN / WAIT_CRC 每次仅需 1~2 字节，逐字节驱动
-         *   状态机保证跨段粘包/拆包与自同步；进入 WAIT_PAYLOAD 后已知确切
-         *   剩余长度（1B cmd + expected_len），直接从 RingBuffer 批量 rb_read
-         *   进 temp_buf（双重校验 target <= sizeof(ctx->temp_buf)），消除每帧
-         *   数百次单字节函数调用。
+         * 设计说明（批量同步与拷贝优化）：
+         *   1. WAIT_HEAD(offset=0) 遇到大段非 0xAA 垃圾数据时，先通过 rb_peek +
+         *      memchr 跳过整段前导垃圾；
+         *   2. WAIT_LEN / WAIT_PAYLOAD / WAIT_CRC 已知确切剩余字节数，直接批量
+         *      rb_read 进 temp_buf（配合 sizeof(temp_buf) 双边界校验），减少单字节
+         *      函数调用开销，同时严格维持五态迁移与跨段拆包语义。
          */
-        if (ctx->state == STATE_WAIT_PAYLOAD) {
+        if (ctx->state == STATE_WAIT_HEAD && ctx->recv_offset == 0) {
+            uint8_t peek_buf[64];
+            size_t n = rb_peek(&ctx->rb, peek_buf, sizeof(peek_buf));
+            const uint8_t *hit;
+            size_t skip;
+
+            if (n == 0) {
+                break;
+            }
+            hit = memchr(peek_buf, PACKET_HEADER_0, n);
+            if (hit == NULL) {
+                (void)rb_read(&ctx->rb, peek_buf, n);
+                continue;
+            }
+            skip = (size_t)(hit - peek_buf);
+            if (skip > 0) {
+                (void)rb_read(&ctx->rb, peek_buf, skip);
+                continue;
+            }
+        } else if (ctx->state == STATE_WAIT_LEN) {
+            size_t remain = 4u - ctx->recv_offset;
+            size_t avail = rb_used(&ctx->rb);
+            size_t chunk = avail < remain ? avail : remain;
+
+            if (chunk > 0) {
+                size_t got = rb_read(&ctx->rb,
+                                     &ctx->temp_buf[ctx->recv_offset], chunk);
+                if (got == 0) {
+                    break;
+                }
+                ctx->recv_offset += got;
+            }
+            if (ctx->recv_offset == 4u) {
+                ctx->expected_len = (uint16_t)((ctx->temp_buf[2] << 8) |
+                                               ctx->temp_buf[3]);
+                if (ctx->expected_len > PARSER_MAX_PAYLOAD_LEN) {
+                    LOG_ERROR("parser: fd=%d excessive payload len %u, reset",
+                              ctx->fd, (unsigned int)ctx->expected_len);
+                    atomic_fetch_add_explicit(&g_len_errors, 1,
+                                              memory_order_relaxed);
+                    parser_reset(ctx);
+                } else {
+                    ctx->state = STATE_WAIT_PAYLOAD;
+                }
+            }
+            continue;
+        } else if (ctx->state == STATE_WAIT_PAYLOAD) {
             size_t target = 4u + 1u + (size_t)ctx->expected_len;
             size_t avail;
             size_t remain;
@@ -365,6 +421,45 @@ static void parser_run(struct parse_ctx *ctx)
                 ctx->state = STATE_WAIT_CRC;
             }
             continue;
+        } else if (ctx->state == STATE_WAIT_CRC) {
+            size_t target = 4u + 1u + (size_t)ctx->expected_len + 2u;
+            size_t avail;
+            size_t remain;
+            size_t chunk;
+
+            if (target > sizeof(ctx->temp_buf)) {
+                LOG_ERROR("parser: fd=%d temp_buf overflow, reset", ctx->fd);
+                parser_reset(ctx);
+                continue;
+            }
+
+            if (ctx->recv_offset < target) {
+                avail = rb_used(&ctx->rb);
+                remain = target - ctx->recv_offset;
+                chunk = avail < remain ? avail : remain;
+                if (chunk > 0) {
+                    size_t got = rb_read(&ctx->rb,
+                                         &ctx->temp_buf[ctx->recv_offset],
+                                         chunk);
+                    if (got == 0) {
+                        break;
+                    }
+                    ctx->recv_offset += got;
+                }
+            }
+
+            if (ctx->recv_offset >= target) {
+                if (packet_checksum_verify(ctx->temp_buf, ctx->recv_offset) == 1) {
+                    ctx->state = STATE_FRAME_COMPLETE;
+                    parser_deliver_frame(ctx);
+                } else {
+                    LOG_ERROR("parser: fd=%d CRC mismatch, drop frame", ctx->fd);
+                    atomic_fetch_add_explicit(&g_crc_errors, 1,
+                                              memory_order_relaxed);
+                    parser_reset(ctx);
+                }
+            }
+            continue;
         }
 
         if (rb_read(&ctx->rb, &byte, 1) != 1) {
@@ -377,6 +472,30 @@ static void parser_run(struct parse_ctx *ctx)
     }
 }
 
+int packet_parser_feed_ctx(struct parse_ctx *ctx, const uint8_t *data, size_t len)
+{
+    if (ctx == NULL || (data == NULL && len > 0)) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    if (len > 0) {
+        size_t written;
+
+        written = rb_write(&ctx->rb, data, len);
+        if (written < len) {
+            LOG_ERROR("parser: fd=%d ring buffer full, wrote %zu/%zu bytes, "
+                      "closing connection", ctx->fd, written, len);
+            parser_reset(ctx);
+            errno = ENOBUFS;
+            return -1;
+        }
+    }
+
+    parser_run(ctx);
+    return 0;
+}
+
 int packet_parser_feed(int fd, const uint8_t *data, size_t len)
 {
     struct parse_ctx *ctx;
@@ -386,27 +505,26 @@ int packet_parser_feed(int fd, const uint8_t *data, size_t len)
         return -1;
     }
 
-   ctx = parser_find(fd);
-   if (ctx == NULL) {
+    ctx = parser_find(fd);
+    if (ctx == NULL) {
         LOG_ERROR("packet_parser_feed: fd=%d not registered", fd);
-       errno = ENOENT;
-       return -1;
+        errno = ENOENT;
+        return -1;
     }
 
-    if (len > 0) {
-        size_t written;
+    return packet_parser_feed_ctx(ctx, data, len);
+}
 
-        written = rb_write(&ctx->rb, data, len);
-       if (written < len) {
-            LOG_ERROR("parser: fd=%d ring buffer full, wrote %zu/%zu bytes, "
-                      "closing connection", fd, written, len);
-           parser_reset(ctx);
-            errno = ENOBUFS;
-            return -1;
-        }
+void packet_parser_get_stats(struct parser_stats *out)
+{
+    if (out == NULL) {
+        return;
     }
 
-    parser_run(ctx);
-
-    return 0;
+    out->frames_ok  = (uint64_t)atomic_load_explicit(&g_frames_ok,
+                                                     memory_order_relaxed);
+    out->crc_errors = (uint64_t)atomic_load_explicit(&g_crc_errors,
+                                                     memory_order_relaxed);
+    out->len_errors = (uint64_t)atomic_load_explicit(&g_len_errors,
+                                                     memory_order_relaxed);
 }

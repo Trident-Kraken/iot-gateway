@@ -16,8 +16,10 @@
 #include "gateway/heartbeat.h"
 #include "utils/logger.h"
 #include "business/mqtt_client.h"
+#include "protocol/packet_parser.h"
 #include "gateway/server.h"
 #include "gateway/epoll_worker.h"
+#include "utils/task_queue.h"
 #include "utils/threadpool.h"
 
 #define DEFAULT_CONFIG_PATH "config/gateway.ini"
@@ -40,6 +42,53 @@ static void handle_shutdown_signal(int sig)
     epoll_worker_request_stop();
 }
 
+static void handle_stats_signal(int sig)
+{
+    (void)sig;
+    epoll_worker_request_stats();
+}
+
+static void log_gateway_stats(const char *reason)
+{
+    struct epoll_stats es;
+    struct parser_stats ps;
+    struct task_queue_stats qs;
+    struct mqtt_stats ms;
+
+    epoll_worker_get_stats(&es);
+    packet_parser_get_stats(&ps);
+    task_queue_get_stats(&qs);
+    mqtt_client_get_stats(&ms);
+
+    LOG_INFO("stats[%s]: active=%llu accepted=%llu pool_rej=%llu "
+             "frames_ok=%llu crc_err=%llu len_err=%llu "
+             "q_depth=%zu q_push=%llu q_pop=%llu q_drop=%llu "
+             "dl_ok=%llu dl_err=%llu "
+             "mqtt_pub=%llu mqtt_ack=%llu mqtt_cached=%llu mqtt_evict=%llu",
+             reason != NULL ? reason : "snapshot",
+             (unsigned long long)es.active_conns,
+             (unsigned long long)es.accepted_conns,
+             (unsigned long long)es.pool_rejected,
+             (unsigned long long)ps.frames_ok,
+             (unsigned long long)ps.crc_errors,
+             (unsigned long long)ps.len_errors,
+             qs.depth,
+             (unsigned long long)qs.pushed,
+             (unsigned long long)qs.popped,
+             (unsigned long long)qs.dropped_full,
+             (unsigned long long)es.downlink_sent,
+             (unsigned long long)es.downlink_failed,
+             (unsigned long long)ms.published,
+             (unsigned long long)ms.publish_acked,
+             (unsigned long long)ms.cached,
+             (unsigned long long)ms.cache_evicted);
+}
+
+static void handle_stats_hook(void)
+{
+    log_gateway_stats("sigusr1");
+}
+
 static int ignore_sigpipe(void)
 {
     struct sigaction sa;
@@ -59,15 +108,22 @@ static int ignore_sigpipe(void)
 static int install_shutdown_handlers(void)
 {
     struct sigaction sa;
+    struct sigaction sa_usr1;
 
     memset(&sa, 0, sizeof(sa));
     sa.sa_handler = handle_shutdown_signal;
     sigemptyset(&sa.sa_mask);
     sa.sa_flags = SA_RESTART; /* 被信号打断的阻塞系统调用自动重启 */
 
+    memset(&sa_usr1, 0, sizeof(sa_usr1));
+    sa_usr1.sa_handler = handle_stats_signal;
+    sigemptyset(&sa_usr1.sa_mask);
+    sa_usr1.sa_flags = SA_RESTART;
+
     if (sigaction(SIGTERM, &sa, NULL) != 0 ||
-        sigaction(SIGINT, &sa, NULL) != 0) {
-        LOG_ERROR("failed to install shutdown signal handlers: %s",
+        sigaction(SIGINT, &sa, NULL) != 0 ||
+        sigaction(SIGUSR1, &sa_usr1, NULL) != 0) {
+        LOG_ERROR("failed to install signal handlers: %s",
                   strerror(errno));
         return -1;
     }
@@ -250,6 +306,8 @@ int main(int argc, char *argv[])
         return EXIT_FAILURE;
     }
 
+    epoll_worker_set_stats_hook(handle_stats_hook);
+
     /* 阻塞运行：优雅停机返回 0，致命 epoll 错误返回 -1。 */
     int rc = epoll_worker_run(listen_fd);
 
@@ -259,6 +317,7 @@ int main(int argc, char *argv[])
                  g_signal_num == SIGTERM ? "SIGTERM" : "stop request");
     }
 
+    log_gateway_stats("shutdown");
     cleanup_gateway(listen_fd);
 
     return rc == 0 ? EXIT_SUCCESS : EXIT_FAILURE;

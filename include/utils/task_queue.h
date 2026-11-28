@@ -74,6 +74,20 @@ struct task *task_queue_pop(void);
  */
 void task_queue_release(struct task *task);
 
+struct task_queue_stats {
+    size_t   depth;
+    uint64_t pushed;
+    uint64_t popped;
+    uint64_t dropped_full;
+};
+
+/**
+ * @brief 读取任务队列的当前深度与累计统计计数。
+ *
+ * @param out 输出结构体指针。
+ */
+void task_queue_get_stats(struct task_queue_stats *out);
+
 /**
  * @brief 关闭队列并唤醒所有阻塞的 pop() 调用者。
  *

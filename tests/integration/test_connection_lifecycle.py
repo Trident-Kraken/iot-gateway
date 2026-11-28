@@ -32,7 +32,7 @@ thread_pool_size=2
 heartbeat_interval=1
 heartbeat_timeout=3
 [log]
-log_level=ERROR
+log_level=INFO
 [mqtt]
 mqtt_broker=localhost
 mqtt_port=1883
@@ -178,7 +178,11 @@ def main() -> int:
               baseline >= 0 and after >= 0 and after <= baseline + 5,
               f"(baseline={baseline}, after={after})")
 
-        # --- D. SIGTERM 优雅退出 ---
+        # --- D. SIGUSR1 实时指标 + SIGTERM 优雅退出 ---
+        gw.send_signal(signal.SIGUSR1)
+        time.sleep(0.2)
+        check("D1. SIGUSR1 后网关进程保持存活", gw.poll() is None)
+
         # 停机信号后：事件循环超时轮询感知 → 关闭全部连接 → main 走完
         # 逆序清理（心跳/线程池/MQTT/conn_manager/logger/config）→ exit 0。
         gw.send_signal(signal.SIGTERM)
@@ -186,8 +190,17 @@ def main() -> int:
             exit_code = gw.wait(timeout=15)
         except subprocess.TimeoutExpired:
             exit_code = None
-        check("D. SIGTERM 后网关优雅退出 (exit=0)",
+        check("D2. SIGTERM 后网关优雅退出 (exit=0)",
               exit_code == 0, f"(exit={exit_code})")
+
+        log_path = os.path.join(tmp, "logs", "gateway.log")
+        try:
+            with open(log_path) as lf:
+                log_text = lf.read()
+        except OSError:
+            log_text = ""
+        check("D3. 日志落盘 SIGUSR1 与停机统计快照",
+              "stats[sigusr1]:" in log_text and "stats[shutdown]:" in log_text)
     finally:
         if gw.poll() is None:
             gw.terminate()

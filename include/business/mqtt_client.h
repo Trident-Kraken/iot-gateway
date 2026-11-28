@@ -1,9 +1,21 @@
 #ifndef IOT_GATEWAY_MQTT_CLIENT_H
 #define IOT_GATEWAY_MQTT_CLIENT_H
 
+#include <stdint.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+/**
+ * @brief MQTT 客户端统计快照。
+ */
+struct mqtt_stats {
+    uint64_t published;     /* 成功提交给 libmosquitto 的消息数 */
+    uint64_t publish_acked; /* QoS 1/2 回调确认计数（on_publish） */
+    uint64_t cached;        /* 进入离线缓存的消息总数 */
+    uint64_t cache_evicted; /* 离线缓存满（512）淘汰的最旧消息数 */
+};
 
 /**
  * @brief 初始化 MQTT 客户端，连接到 Mosquitto Broker。
@@ -58,6 +70,13 @@ int mqtt_publish(const char *topic, const char *payload);
  * 线程停止后调用。
  */
 void mqtt_client_destroy(void);
+
+/**
+ * @brief 读取 MQTT 客户端的原子统计计数快照。
+ *
+ * @param out 输出结构体指针。
+ */
+void mqtt_client_get_stats(struct mqtt_stats *out);
 
 #ifdef __cplusplus
 }

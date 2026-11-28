@@ -139,14 +139,27 @@ static void test_reinit_full_pool(void)
     }
     {
         struct task tk = make_task(0xFF);
+        struct task_queue_stats qs;
         errno = 0;
         CHECK(task_queue_push(&tk) == -1);
         CHECK(errno == ENOMEM);
+
+        task_queue_get_stats(&qs);
+        CHECK(qs.depth == 2048);
+        CHECK(qs.pushed == 2048);
+        CHECK(qs.popped == 0);
+        CHECK(qs.dropped_full == 1);
     }
     for (i = 0; i < 2048; i++) {
         struct task *t = task_queue_pop();
         CHECK(t != NULL);
         task_queue_release(t);
+    }
+    {
+        struct task_queue_stats qs;
+        task_queue_get_stats(&qs);
+        CHECK(qs.depth == 0);
+        CHECK(qs.popped == 2048);
     }
     task_queue_shutdown();
     task_queue_destroy();

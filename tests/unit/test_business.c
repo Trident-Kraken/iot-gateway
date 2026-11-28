@@ -159,6 +159,7 @@ static void test_invalid_numbers_fallback(void)
     CHECK(g_mqtt_calls == 1);
     CHECK(strstr(g_last_mqtt_payload, "\"temp\":-12.5,") != NULL);
     CHECK(strstr(g_last_mqtt_payload, "\"hum\":1e2,") != NULL);
+    CHECK(strstr(g_last_mqtt_payload, "\"gateway_time\":") != NULL);
 
     /* 超长数字 token（>= 64 字节）必须拒绝回退，不能静默截断。 */
     {

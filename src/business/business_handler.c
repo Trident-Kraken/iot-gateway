@@ -26,6 +26,13 @@
 #define JSON_KEY_MAX   32
 #define JSON_VALUE_MAX 64
 
+#define JSON_EXTRACT_LIT(json, len, qkey, buf) \
+    json_extract_quoted((json), (len), (qkey), sizeof(qkey) - 1, \
+                        (buf), sizeof(buf))
+
+#define BUF_APPEND_LIT(dst, cap, pos, lit) \
+    buf_append_mem((dst), (cap), (pos), (lit), sizeof(lit) - 1)
+
 static cmd_handler_t g_cmd_handlers[256];
 
 /* =========================================================================
@@ -34,26 +41,85 @@ static cmd_handler_t g_cmd_handlers[256];
 
 /*
  * 在长度受限的内存区域 haystack[0..haystack_len) 内查找子串 needle，
- * 不依赖 NUL 结尾，防止非 NUL 终止的原始协议 payload 越界读取。
+ * 基于 memchr() 向量化跳跃首字节，不依赖 NUL 结尾，防越界读取。
  */
 static const char *find_substr_len(const char *haystack, size_t haystack_len,
                                    const char *needle, size_t needle_len)
 {
-    size_t i;
+    const char *cur;
+    const char *limit;
 
     if (haystack == NULL || needle == NULL || needle_len == 0 ||
         haystack_len < needle_len) {
         return NULL;
     }
 
-    for (i = 0; i <= haystack_len - needle_len; i++) {
-        if (haystack[i] == needle[0] &&
-            memcmp(haystack + i, needle, needle_len) == 0) {
-            return haystack + i;
+    cur = haystack;
+    limit = haystack + (haystack_len - needle_len) + 1;
+
+    while (cur < limit) {
+        const char *hit = memchr(cur, (unsigned char)needle[0],
+                                 (size_t)(limit - cur));
+        if (hit == NULL) {
+            return NULL;
         }
+        if (needle_len == 1 ||
+            memcmp(hit + 1, needle + 1, needle_len - 1) == 0) {
+            return hit;
+        }
+        cur = hit + 1;
     }
 
     return NULL;
+}
+
+static int buf_append_mem(char *dst, size_t dst_cap, size_t *pos,
+                          const char *src, size_t src_len)
+{
+    if (src_len >= dst_cap - *pos) {
+        return -1;
+    }
+
+    memcpy(dst + *pos, src, src_len);
+    *pos += src_len;
+    return 0;
+}
+
+static size_t i64_to_str(long long val, char *out, size_t out_cap)
+{
+    char tmp[24];
+    size_t len = 0;
+    unsigned long long uval;
+    size_t i = 0;
+
+    if (out_cap == 0) {
+        return 0;
+    }
+
+    if (val < 0) {
+        if (out_cap < 2) {
+            return 0;
+        }
+        out[i++] = '-';
+        uval = (unsigned long long)(-(val + 1)) + 1ULL;
+    } else {
+        uval = (unsigned long long)val;
+    }
+
+    do {
+        tmp[len++] = (char)('0' + (uval % 10ULL));
+        uval /= 10ULL;
+    } while (uval > 0 && len < sizeof(tmp));
+
+    if (i + len >= out_cap) {
+        return 0;
+    }
+
+    while (len > 0) {
+        out[i++] = tmp[--len];
+    }
+    out[i] = '\0';
+    return i;
 }
 
 /*
@@ -135,24 +201,18 @@ static void sanitize_json_string(char *s)
  *
  * 返回 0 成功，-1 未找到或格式不合法。
  */
-static int json_extract(const char *json, size_t json_len,
-                        const char *key, char *val_buf, size_t val_size)
+static int json_extract_quoted(const char *json, size_t json_len,
+                               const char *quoted_key, size_t qk_len,
+                               char *val_buf, size_t val_size)
 {
     const char *json_end;
     const char *cursor;
     const char *colon = NULL;
     const char *start;
     const char *end;
-    char search_key[JSON_KEY_MAX];
-    int sk_len;
 
-    if (json == NULL || key == NULL || val_buf == NULL || val_size == 0) {
-        return -1;
-    }
-
-    /* 构造带引号的搜索串: "key" */
-    sk_len = snprintf(search_key, sizeof(search_key), "\"%s\"", key);
-    if (sk_len < 0 || (size_t)sk_len >= sizeof(search_key)) {
+    if (json == NULL || quoted_key == NULL || qk_len < 3 ||
+        val_buf == NULL || val_size == 0) {
         return -1;
     }
 
@@ -162,7 +222,7 @@ static int json_extract(const char *json, size_t json_len,
     /* 1. 迭代定位真正的 key（后面紧跟空白 + ':' 且非转义引号）。 */
     while (cursor < json_end) {
         const char *pos = find_substr_len(cursor, (size_t)(json_end - cursor),
-                                          search_key, (size_t)sk_len);
+                                          quoted_key, qk_len);
         const char *p;
 
         if (pos == NULL) {
@@ -170,7 +230,7 @@ static int json_extract(const char *json, size_t json_len,
         }
 
         if (pos == json || pos[-1] != '\\') {
-            p = pos + sk_len;
+            p = pos + qk_len;
             while (p < json_end &&
                    (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n')) {
                 p++;
@@ -275,66 +335,84 @@ void handle_sensor_data(int fd, uint64_t generation,
 {
     (void)generation;
     const char *json = (const char *)payload;
-    char device_id[JSON_VALUE_MAX]   = "unknown";
-    char temp_str[JSON_VALUE_MAX]    = "0.0";
-    char hum_str[JSON_VALUE_MAX]     = "0.0";
-    char ts_str[JSON_VALUE_MAX]      = "0";
+    char device_buf[JSON_VALUE_MAX];
+    char temp_buf[JSON_VALUE_MAX];
+    char hum_buf[JSON_VALUE_MAX];
+    char ts_buf[JSON_VALUE_MAX];
+    char gw_ts_buf[24];
+    const char *device_id = "unknown";
+    const char *temp_str  = "0.0";
+    const char *hum_str   = "0.0";
+    const char *ts_str    = "0";
+    size_t device_len = sizeof("unknown") - 1;
+    size_t temp_len   = sizeof("0.0") - 1;
+    size_t hum_len    = sizeof("0.0") - 1;
+    size_t ts_len     = sizeof("0") - 1;
+    size_t gw_ts_len;
 
     /*
      * MQTT 上报的 JSON 缓冲区。
      * 最大约 256 字节（device_id + temp + hum + ts + 固定开销）。
      */
     char mqtt_json[384];
-    int mqtt_json_len;
+    size_t pos = 0;
 
     if (payload == NULL || len == 0) {
         LOG_ERROR("handle_sensor_data: fd=%d empty payload", fd);
         return;
     }
 
-    /* 1. 轻量级 JSON 字段提取（按 len 限界，零 malloc）。 */
-    if (json_extract(json, len, "device_id",
-                     device_id, sizeof(device_id)) != 0) {
-        snprintf(device_id, sizeof(device_id), "unknown");
-    } else {
-        sanitize_json_string(device_id);
+    /* 1. 轻量级 JSON 字段提取（按 len 限界，零 malloc、零 snprintf）。 */
+    if (JSON_EXTRACT_LIT(json, len, "\"device_id\"", device_buf) == 0) {
+        sanitize_json_string(device_buf);
+        device_id = device_buf;
+        device_len = strlen(device_buf);
     }
 
-    if (json_extract(json, len, "temp", temp_str, sizeof(temp_str)) != 0 ||
-        !is_valid_json_number(temp_str)) {
-        snprintf(temp_str, sizeof(temp_str), "0.0");
+    if (JSON_EXTRACT_LIT(json, len, "\"temp\"", temp_buf) == 0 &&
+        is_valid_json_number(temp_buf)) {
+        temp_str = temp_buf;
+        temp_len = strlen(temp_buf);
     }
 
-    if (json_extract(json, len, "hum", hum_str, sizeof(hum_str)) != 0 ||
-        !is_valid_json_number(hum_str)) {
-        snprintf(hum_str, sizeof(hum_str), "0.0");
+    if (JSON_EXTRACT_LIT(json, len, "\"hum\"", hum_buf) == 0 &&
+        is_valid_json_number(hum_buf)) {
+        hum_str = hum_buf;
+        hum_len = strlen(hum_buf);
     }
 
-    if (json_extract(json, len, "timestamp", ts_str, sizeof(ts_str)) != 0 ||
-        !is_valid_json_number(ts_str)) {
-        snprintf(ts_str, sizeof(ts_str), "0");
+    if (JSON_EXTRACT_LIT(json, len, "\"timestamp\"", ts_buf) == 0 &&
+        is_valid_json_number(ts_buf)) {
+        ts_str = ts_buf;
+        ts_len = strlen(ts_buf);
     }
 
     /* 高频路径（每帧一条）：用 DEBUG 避免刷屏与日志 I/O 瓶颈。 */
     LOG_DEBUG("handle_sensor_data: fd=%d device=%s temp=%s hum=%s ts=%s",
               fd, device_id, temp_str, hum_str, ts_str);
 
-    /* 2. 重新打包为标准 JSON 并上报 MQTT。 */
-    mqtt_json_len = snprintf(mqtt_json, sizeof(mqtt_json),
-                             "{"
-                             "\"device_id\":\"%s\","
-                             "\"temp\":%s,"
-                             "\"hum\":%s,"
-                             "\"timestamp\":%s,"
-                             "\"gateway_time\":%ld"
-                             "}",
-                             device_id, temp_str, hum_str, ts_str,
-                             (long)time(NULL));
-
-    if (mqtt_json_len < 0 || (size_t)mqtt_json_len >= sizeof(mqtt_json)) {
-        LOG_ERROR("handle_sensor_data: snprintf overflow for fd=%d", fd);
+    /* 2. 分段 memcpy 拼装标准 JSON 并上报 MQTT（零 snprintf 格式解析）。 */
+    gw_ts_len = i64_to_str((long long)time(NULL), gw_ts_buf, sizeof(gw_ts_buf));
+    if (gw_ts_len == 0) {
+        LOG_ERROR("handle_sensor_data: gateway_time format failed for fd=%d", fd);
         return;
     }
+
+    if (BUF_APPEND_LIT(mqtt_json, sizeof(mqtt_json), &pos, "{\"device_id\":\"") != 0 ||
+        buf_append_mem(mqtt_json, sizeof(mqtt_json), &pos, device_id, device_len) != 0 ||
+        BUF_APPEND_LIT(mqtt_json, sizeof(mqtt_json), &pos, "\",\"temp\":") != 0 ||
+        buf_append_mem(mqtt_json, sizeof(mqtt_json), &pos, temp_str, temp_len) != 0 ||
+        BUF_APPEND_LIT(mqtt_json, sizeof(mqtt_json), &pos, ",\"hum\":") != 0 ||
+        buf_append_mem(mqtt_json, sizeof(mqtt_json), &pos, hum_str, hum_len) != 0 ||
+        BUF_APPEND_LIT(mqtt_json, sizeof(mqtt_json), &pos, ",\"timestamp\":") != 0 ||
+        buf_append_mem(mqtt_json, sizeof(mqtt_json), &pos, ts_str, ts_len) != 0 ||
+        BUF_APPEND_LIT(mqtt_json, sizeof(mqtt_json), &pos, ",\"gateway_time\":") != 0 ||
+        buf_append_mem(mqtt_json, sizeof(mqtt_json), &pos, gw_ts_buf, gw_ts_len) != 0 ||
+        BUF_APPEND_LIT(mqtt_json, sizeof(mqtt_json), &pos, "}") != 0) {
+        LOG_ERROR("handle_sensor_data: json buffer overflow for fd=%d", fd);
+        return;
+    }
+    mqtt_json[pos] = '\0';
 
     (void)mqtt_publish(MQTT_TOPIC_SENSOR, mqtt_json);
 }

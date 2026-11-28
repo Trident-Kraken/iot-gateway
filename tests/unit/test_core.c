@@ -329,6 +329,41 @@ static void test_packet_parser(void)
         packet_parser_unregister(7);
     }
 
+    /* ctx 直连解析 + 前导非 0xAA 垃圾批量跳过 + 解析器统计计数校验。 */
+    {
+        struct parse_ctx *ctx = NULL;
+        struct parser_stats before;
+        struct parser_stats after;
+        uint8_t noise_and_frame[128 + PROTOCOL_MAX_FRAME_SIZE];
+        uint8_t bad_crc[PROTOCOL_MAX_FRAME_SIZE];
+        uint8_t bad_len[] = { 0xAA, 0x55, 0x09, 0x00, 0x01, 0x00 };
+
+        packet_parser_get_stats(&before);
+        g_frame_count = 0;
+
+        CHECK(packet_parser_register(8, &ctx) == 0);
+        CHECK(ctx != NULL);
+
+        memset(noise_and_frame, 0x33, 128);
+        memcpy(noise_and_frame + 128, frame1, len1);
+        CHECK(packet_parser_feed_ctx(ctx, noise_and_frame, 128 + len1) == 0);
+        CHECK(g_frame_count == 1);
+        CHECK(g_last_len == len1 && memcmp(g_last_frame, frame1, len1) == 0);
+
+        memcpy(bad_crc, frame1, len1);
+        bad_crc[len1 - 1] ^= 0xFF;
+        CHECK(packet_parser_feed_ctx(ctx, bad_crc, len1) == 0);
+        CHECK(packet_parser_feed_ctx(ctx, bad_len, sizeof(bad_len)) == 0);
+        CHECK(g_frame_count == 1);
+
+        packet_parser_get_stats(&after);
+        CHECK(after.frames_ok == before.frames_ok + 1);
+        CHECK(after.crc_errors == before.crc_errors + 1);
+        CHECK(after.len_errors == before.len_errors + 1);
+
+        packet_parser_unregister(8);
+    }
+
 }
 
 int main(void)

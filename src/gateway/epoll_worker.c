@@ -5,6 +5,7 @@
 #include <errno.h>
 #include <limits.h>
 #include <signal.h>
+#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -37,6 +38,17 @@ static int g_close_pipe[2] = { -1, -1 };
  * epoll_worker_request_stop() 置位。volatile sig_atomic_t 是信号处理器
  * 与普通代码共享标志的标准类型（单字读写原子，async-signal-safe）。 */
 static volatile sig_atomic_t g_stop_requested = 0;
+
+/* 运行时统计快照请求标志（SIGUSR1 async-signal-safe）与回调钩子。 */
+static volatile sig_atomic_t g_stats_requested = 0;
+static void (*g_stats_hook)(void) = NULL;
+
+/* epoll I/O 线程统计计数器（仅 epoll 线程写入，relaxed 原子读取）。 */
+static atomic_uint_fast64_t g_active_conns    = 0;
+static atomic_uint_fast64_t g_accepted_conns  = 0;
+static atomic_uint_fast64_t g_pool_rejected   = 0;
+static atomic_uint_fast64_t g_downlink_sent   = 0;
+static atomic_uint_fast64_t g_downlink_failed = 0;
 
 /* Doubly-linked list of active client connections (O(1) removal).
  * Only accessed by the epoll thread, no lock needed. */
@@ -72,6 +84,7 @@ struct connection {
      * 见 connection_close 与事件分发处的设计说明）。对象池 acquire
      * 时的 memset 会把它清零，新连接天然为“未关闭”。 */
     int       closed;
+    struct parse_ctx  *parser;    /* 直连每连接解析器上下文（O(1) 零查表） */
     struct connection *next;      /* 活跃双向链 next / 空闲链与 trash 链指针 */
     struct connection *prev;      /* 活跃双向链 prev（O(1) 删除） */
     struct connection *hash_next; /* fd 哈希桶链表指针（O(1) 查找） */
@@ -312,6 +325,34 @@ void epoll_worker_request_stop(void)
     g_stop_requested = 1;
 }
 
+void epoll_worker_request_stats(void)
+{
+    g_stats_requested = 1;
+}
+
+void epoll_worker_set_stats_hook(void (*hook)(void))
+{
+    g_stats_hook = hook;
+}
+
+void epoll_worker_get_stats(struct epoll_stats *out)
+{
+    if (out == NULL) {
+        return;
+    }
+
+    out->active_conns    = (uint64_t)atomic_load_explicit(&g_active_conns,
+                                                          memory_order_relaxed);
+    out->accepted_conns  = (uint64_t)atomic_load_explicit(&g_accepted_conns,
+                                                          memory_order_relaxed);
+    out->pool_rejected   = (uint64_t)atomic_load_explicit(&g_pool_rejected,
+                                                          memory_order_relaxed);
+    out->downlink_sent   = (uint64_t)atomic_load_explicit(&g_downlink_sent,
+                                                          memory_order_relaxed);
+    out->downlink_failed = (uint64_t)atomic_load_explicit(&g_downlink_failed,
+                                                          memory_order_relaxed);
+}
+
 void epoll_worker_request_close(int fd, uint64_t generation)
 {
     struct pipe_msg msg;
@@ -443,6 +484,7 @@ static void connection_close(int epoll_fd, struct connection *conn)
     /* Remove from the client connection list & hash table. */
     if (conn->role == CONN_ROLE_CLIENT) {
         conn_list_remove(conn);
+        atomic_fetch_sub_explicit(&g_active_conns, 1, memory_order_relaxed);
     }
 
     if (epoll_ctl(epoll_fd, EPOLL_CTL_DEL, conn->fd, NULL) == -1) {
@@ -509,14 +551,16 @@ static void handle_listen(int epoll_fd, int listen_fd)
 
         conn = conn_pool_acquire();
         if (conn == NULL) {
+            atomic_fetch_add_explicit(&g_pool_rejected, 1,
+                                      memory_order_relaxed);
             LOG_ERROR("handle_listen: connection pool exhausted (%d), "
                       "closing fd=%d", CONN_POOL_CAPACITY, client_fd);
             close(client_fd);
             continue;
         }
 
-        /* 为该连接注册专用的解析器上下文（含RingBuffer）。*/
-        if (packet_parser_register(client_fd, NULL) != 0) {
+        /* 为该连接注册专用的解析器上下文（含 RingBuffer）并缓存直连指针。*/
+        if (packet_parser_register(client_fd, &conn->parser) != 0) {
             LOG_ERROR("handle_listen: packet_parser_register failed, "
                       "closing fd=%d", client_fd);
             conn_pool_release(conn);
@@ -540,15 +584,8 @@ static void handle_listen(int epoll_fd, int listen_fd)
         conn->generation = gen;
         conn->role = CONN_ROLE_CLIENT;
         conn_list_add(conn);
-
-        /*
-         * server_accept() 已设置socket 为非阻塞，但防御性地再检查一次         * 以应对实现可能变化的情况。         */
-        if (fd_set_nonblocking(client_fd) == -1) {
-            LOG_ERROR("handle_listen: fd_set_nonblocking failed, closing fd=%d",
-                      client_fd);
-            connection_close(epoll_fd, conn);
-            continue;
-        }
+        atomic_fetch_add_explicit(&g_active_conns, 1, memory_order_relaxed);
+        atomic_fetch_add_explicit(&g_accepted_conns, 1, memory_order_relaxed);
 
         if (epoll_add(epoll_fd, client_fd, conn) == -1) {
             connection_close(epoll_fd, conn);
@@ -580,10 +617,12 @@ static void handle_client(int epoll_fd, struct connection *conn)
         n = recv(conn->fd, recv_buf, sizeof(recv_buf), 0);
         if (n > 0) {
             /*
-             * 将原始字节送入每连接解析器。解析器的状态机从RingBuffer 中             * 消费字节，并通过 on_frame_complete() 递送完整帧。             */
-            if (packet_parser_feed(conn->fd,
-                                   (const uint8_t *)recv_buf,
-                                   (size_t)n) != 0) {
+             * 将原始字节直连送入每连接解析器（零查表）。状态机从 RingBuffer
+             * 消费字节，并通过 on_frame_complete() 递送完整帧。
+             */
+            if (packet_parser_feed_ctx(conn->parser,
+                                       (const uint8_t *)recv_buf,
+                                       (size_t)n) != 0) {
                 LOG_ERROR("handle_client: packet_parser_feed fd=%d failed",
                           conn->fd);
                 connection_close(epoll_fd, conn);
@@ -655,6 +694,10 @@ static void handle_pipe_messages(int epoll_fd)
             if (conn == NULL) {
                 /* 连接已关闭或 fd 被新连接复用（generation 不匹配）：
                  * 忽略过期请求，这是 fd 复用防护。 */
+                if (msg->type == PIPE_MSG_SEND) {
+                    atomic_fetch_add_explicit(&g_downlink_failed, 1,
+                                              memory_order_relaxed);
+                }
                 continue;
             }
 
@@ -671,12 +714,18 @@ static void handle_pipe_messages(int epoll_fd)
                     sent = send(conn->fd, msg->data, msg->len, MSG_NOSIGNAL);
                 } while (sent == -1 && errno == EINTR);
                 if (sent < 0) {
+                    atomic_fetch_add_explicit(&g_downlink_failed, 1,
+                                              memory_order_relaxed);
                     LOG_ERROR("epoll: send downlink fd=%d failed: %s",
                               msg->fd, strerror(errno));
                 } else if (sent != (ssize_t)msg->len) {
+                    atomic_fetch_add_explicit(&g_downlink_failed, 1,
+                                              memory_order_relaxed);
                     LOG_ERROR("epoll: send downlink fd=%d partial (%zd/%u bytes)",
                               msg->fd, sent, (unsigned int)msg->len);
                 } else {
+                    atomic_fetch_add_explicit(&g_downlink_sent, 1,
+                                              memory_order_relaxed);
                     LOG_DEBUG("epoll: sent downlink frame to fd=%d (%u bytes)",
                               msg->fd, (unsigned int)msg->len);
                 }
@@ -751,6 +800,13 @@ int epoll_worker_run(int listen_fd)
          */
         if (g_stop_requested) {
             break;
+        }
+
+        if (g_stats_requested) {
+            g_stats_requested = 0;
+            if (g_stats_hook != NULL) {
+                g_stats_hook();
+            }
         }
 
         nfds = epoll_wait(epoll_fd, events, EPOLL_MAX_EVENTS,

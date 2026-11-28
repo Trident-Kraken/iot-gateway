@@ -31,6 +31,15 @@ extern "C" {
 struct parse_ctx;
 
 /**
+ * @brief 协议解析器全局统计快照。
+ */
+struct parser_stats {
+    uint64_t frames_ok;   /* 校验通过并递送的完整帧数 */
+    uint64_t crc_errors;  /* CRC16 校验失败丢弃数 */
+    uint64_t len_errors;  /* 超出最大载荷长度重置数 */
+};
+
+/**
  * @brief 当完整帧被解析时调用的回调函数。
  *
  * 上层（如网关主循环或线程池入队器）必须实现此符号。@p frame 指向包含
@@ -73,6 +82,23 @@ void packet_parser_unregister(int fd);
  * @return 成功返回 0，连接未注册时返回 -1。
  */
 int packet_parser_feed(int fd, const uint8_t *data, size_t len);
+
+/**
+ * @brief 直接通过注册时获得的上下文句柄送入原始字节（O(1) 零查表热路径）。
+ *
+ * @param ctx  由 packet_parser_register() 输出的解析器上下文句柄。
+ * @param data 从 recv() 接收到的原始字节。
+ * @param len  接收到的字节数。
+ * @return 成功返回 0，参数非法或 RingBuffer 满时返回 -1 并设置 errno。
+ */
+int packet_parser_feed_ctx(struct parse_ctx *ctx, const uint8_t *data, size_t len);
+
+/**
+ * @brief 读取协议解析器的原子统计计数快照。
+ *
+ * @param out 输出结构体指针。
+ */
+void packet_parser_get_stats(struct parser_stats *out);
 
 #ifdef __cplusplus
 }

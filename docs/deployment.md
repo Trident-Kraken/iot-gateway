@@ -57,14 +57,24 @@ cmake --build build
 # 1. 启动 Mosquitto Broker
 mosquitto -d
 
-# 2. 启动网关（前台）
-./build/src/iot-gateway
+# 2. 启动网关（前台，可选传入自定义配置文件路径）
+./build/src/iot-gateway [config_path]
 
 # 3. 验证监听端口
 ss -tlnp | grep 8080
 ```
 
-日志写入 `logs/gateway.log`（格式 `[YYYY-MM-DD HH:MM:SS] [LEVEL] [file:line] message`，支持轮转）。
+日志写入 `logs/gateway.log`（格式 `[YYYY-MM-DD HH:MM:SS] [LEVEL] [file:line] message`，支持自动创建单层父目录与轮转）。
+
+### 运行时指标快照（SIGUSR1）与诊断脚本
+
+```bash
+# 向运行中的网关触发一次统计日志快照（active/frames_ok/q_depth/dl_ok/mqtt_pub 等）
+kill -USR1 <pid>
+
+# 或使用一键诊断脚本查看进程线程/RSS/FD 数及最新统计行
+bash tools/gateway_stats.sh [pid] [log_path]
+```
 
 ### 停止（优雅停机）
 

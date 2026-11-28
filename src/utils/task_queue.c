@@ -25,6 +25,11 @@ static pthread_mutex_t g_mutex     = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t  g_cond      = PTHREAD_COND_INITIALIZER;
 static struct task_node *g_head    = NULL;
 static struct task_node *g_tail    = NULL;
+static size_t            g_waiters = 0;
+static size_t            g_depth   = 0;
+static uint64_t          g_pushed  = 0;
+static uint64_t          g_popped  = 0;
+static uint64_t          g_dropped_full = 0;
 static int              g_shutdown = 0;
 static int              g_initialized = 0;
 
@@ -64,6 +69,11 @@ int task_queue_init(void)
 
     g_head = NULL;
     g_tail = NULL;
+    g_waiters = 0;
+    g_depth = 0;
+    g_pushed = 0;
+    g_popped = 0;
+    g_dropped_full = 0;
     g_shutdown = 0;
     g_initialized = 1;
 
@@ -129,6 +139,7 @@ int task_queue_push(const struct task *task)
     /* 从对象池取节点（零分配）。池耗尽 = 队列已满（有界水位线）。 */
     node = g_free_nodes;
     if (node == NULL) {
+        g_dropped_full++;
         pthread_mutex_unlock(&g_mutex);
         errno = ENOMEM;
         return -1;
@@ -152,7 +163,13 @@ int task_queue_push(const struct task *task)
         g_tail = node;
     }
 
-    pthread_cond_signal(&g_cond);
+    g_depth++;
+    g_pushed++;
+
+    /* 仅当存在阻塞等待的工作线程时唤醒，避免高吞吐繁忙期无效 syscall。 */
+    if (g_waiters > 0) {
+        pthread_cond_signal(&g_cond);
+    }
     pthread_mutex_unlock(&g_mutex);
 
     return 0;
@@ -180,7 +197,9 @@ struct task *task_queue_pop(void)
      * 引用。使用 'while' 在每次唤醒后在互斥锁下重新检查条件。
      */
     while (g_head == NULL && !g_shutdown) {
+        g_waiters++;
         pthread_cond_wait(&g_cond, &g_mutex);
+        g_waiters--;
     }
 
     if (g_head == NULL) {
@@ -194,6 +213,9 @@ struct task *task_queue_pop(void)
     if (g_head == NULL) {
         g_tail = NULL;
     }
+
+    g_depth--;
+    g_popped++;
 
     pthread_mutex_unlock(&g_mutex);
 
@@ -230,6 +252,25 @@ void task_queue_release(struct task *task)
     pthread_mutex_lock(&g_mutex);
     node->next = g_free_nodes;
     g_free_nodes = node;
+    pthread_mutex_unlock(&g_mutex);
+}
+
+void task_queue_get_stats(struct task_queue_stats *out)
+{
+    if (out == NULL) {
+        return;
+    }
+
+    if (!g_initialized) {
+        memset(out, 0, sizeof(*out));
+        return;
+    }
+
+    pthread_mutex_lock(&g_mutex);
+    out->depth        = g_depth;
+    out->pushed       = g_pushed;
+    out->popped       = g_popped;
+    out->dropped_full = g_dropped_full;
     pthread_mutex_unlock(&g_mutex);
 }
 

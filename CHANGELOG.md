@@ -10,7 +10,9 @@
 - `fix(build/ci)`: 修复 `CMakeLists.txt` 覆盖外部 `CMAKE_C_FLAGS` 导致 Sanitizer 构建未生效的问题；CI 新增真实 ASan+UBSan+LSan 回归门槛。
 - `fix(gateway/mqtt/utils)`: 心跳活跃时间戳与超时判定改用 `CLOCK_MONOTONIC` 免疫系统时钟跳变；心跳批关闭上限调整为 48 并支持多轮排空防止撑爆 self-pipe；修复 `mqtt_cache_flush()` 仅循环 4 轮可能遗留离线缓存、持 `g_mqtt.lock` 期间写日志、`task_queue_init()` 二次初始化池容量缩水与 `on_frame_complete()` 最小帧长校验不严等隐患；`json_extract()` 拒绝超长非字符串截断，`sanitize_json_string()` 过滤 `>=0x7F` 字节。
 - `perf(core)`: `epoll_worker` / `packet_parser` / `conn_manager` 全面升级为 1024 桶 O(1) 哈希索引，消除 `on_frame_complete()` 每帧跨模块加锁；`ringbuffer` 改用双段 `memcpy`，`packet_parser` `STATE_WAIT_PAYLOAD` 批量读取；`handle_config()` 改用栈上 `packet_encode_raw()` 零堆分配并降低常规路径 `LOG_INFO`；开启 `TCP_NODELAY` 与 `FD_CLOEXEC`，支持命令行传参配置文件路径与自动创建单层日志目录。
-- `test(unit/integration)`: 全部集成与 soak 脚本支持 `IOT_GATEWAY_BIN` 环境变量并消除端口 `8084` 冲突；扩充 `unit_tests` / `unit_business` / `unit_task_queue` / `unit_fd_util` 用例。
+- `perf(pipeline)`: `business_handler` 改用 `memchr()` 向量化查找、`JSON_EXTRACT_LIT` 编译期键长度与零 `snprintf` 分段 `memcpy` 组装；`epoll_worker` 保存直连 `parse_ctx*` 指针走 `packet_parser_feed_ctx()` 并消除重复 `fcntl`；`packet_parser` 批量跳过前导垃圾并按状态批量读取 `LEN`/`CRC`；`task_queue` 仅在 `g_waiters > 0` 时调用 `pthread_cond_signal`；`mqtt_client` 离线缓存改用单块连续分配减少 50% 堆分配。
+- `feat(observability)`: 新增全链路无锁/低开销统计接口与 `SIGUSR1` 运行时统计快照（停机时自动汇总），新增运维诊断脚本 `tools/gateway_stats.sh`。
+- `test(unit/integration)`: 全部集成与 soak 脚本支持 `IOT_GATEWAY_BIN` 环境变量并消除端口 `8084` 冲突；扩充 `unit_tests` / `unit_business` / `unit_task_queue` / `unit_fd_util` 用例与 `shell_syntax_check`。
 
 ## [1.0.1] - 2026-11-24
 

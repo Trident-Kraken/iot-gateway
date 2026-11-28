@@ -20,33 +20,34 @@
 
 ## 2. 最新全量回归（Release / ASan / TSan 三重门槛）
 
-在最近一次全仓缺陷修复后，使用 `-Wall -Wextra` 编译全部目标（零错误、零警告），执行 16 项 CTest（9 项单元测试/脚本自检 + 7 项集成测试，无跳过、无失败）：
+在最近一次全仓缺陷修复后，使用 `-Wall -Wextra` 编译全部目标（零错误、零警告），执行 17 项 CTest（10 项单元测试/脚本自检 + 7 项集成测试，无跳过、无失败）：
 
 | 构建类型 | 编译选项 | CTest 结果 | 耗时 | Sanitizer / 备注 |
 |---|---|---|---|---|
-| **Release** | `-O2` | **16/16 PASS** | 99.98 s | 零警告；全部集成测试真实执行 |
-| **ASan + UBSan + LSan** | `-fsanitize=address,undefined -fno-omit-frame-pointer -g -O1` | **16/16 PASS** | 99.52 s | `ASAN_OPTIONS=detect_leaks=1:halt_on_error=1`、`UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1`，零越界、零泄漏、零 UB |
-| **TSan** | `-fsanitize=thread -fno-omit-frame-pointer -g -O1` | **16/16 PASS** | 99.25 s | `setarch $(uname -m) -R` 下执行，零数据竞争报告 |
+| **Release** | `-O2` | **17/17 PASS** | 99.73 s | 零警告；全部集成测试真实执行 |
+| **ASan + UBSan + LSan** | `-fsanitize=address,undefined -fno-omit-frame-pointer -g -O1` | **17/17 PASS** | 99.93 s | `ASAN_OPTIONS=detect_leaks=1:halt_on_error=1`、`UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1`，零越界、零泄漏、零 UB |
+| **TSan** | `-fsanitize=thread -fno-omit-frame-pointer -g -O1` | **17/17 PASS** | 100.36 s | `setarch $(uname -m) -R` 下执行，零数据竞争报告 |
 
 ### 单元测试明细
 
 | 用例 | 覆盖范围 | 断言数 | 结果 |
 |---|---|---|---|
-| `unit_tests` | CRC16 向量 / 编解码（含 `packet_encode_raw`、空指针与上限校验） / RingBuffer / 状态机拆包粘包坏帧及大载荷跨绕回分片批量读取 | 124 | ✅ 通过 |
+| `unit_tests` | CRC16 向量 / 编解码（含 `packet_encode_raw`、空指针与上限校验） / RingBuffer / 状态机拆包粘包坏帧、大载荷跨绕回分片与 `feed_ctx` 直连统计 | 135 | ✅ 通过 |
 | `unit_config` | `config_parser`：trim / 行内注释 / 重复 key 覆盖 / 超长行丢弃 / 溢出与非法整数告警 | 34 | ✅ 通过 |
-| `unit_task_queue` | 对象池 FIFO / 有界水位线（2048 满拒入） / shutdown 语义 / 二次初始化完整池容量回归 | 8217 | ✅ 通过 |
+| `unit_task_queue` | 对象池 FIFO / 有界水位线（2048 满拒入） / shutdown 语义 / 二次初始化完整池容量与统计计数回归 | 8223 | ✅ 通过 |
 | `unit_threadpool` | NULL 回调拒绝 / 1000 任务全处理 / destroy 后提交拒绝 | 1006 | ✅ 通过 |
 | `unit_fd_util` | 非阻塞设置 / `FD_CLOEXEC` 设置 / 非法 fd | 17 | ✅ 通过 |
 | `unit_ringbuffer_wrap` | head/tail 绕回、满拒写、跨数组边界读写完整性 | 1672 | ✅ 通过 |
-| `unit_business` | JSON 同名 value 碰撞、RFC 8259 数字校验、超长数字拒绝、字符串清洗（含 `>=0x7F`）、无 NUL 堆边界、`CMD_CONFIG`/`CMD_HEARTBEAT` 分发 | 42 | ✅ 通过 |
+| `unit_business` | JSON 同名 value 碰撞、RFC 8259 数字校验、超长数字拒绝、字符串清洗（含 `>=0x7F`）、无 NUL 堆边界、`CMD_CONFIG`/`CMD_HEARTBEAT` 分发 | 43 | ✅ 通过 |
 | `python_syntax_check` | 9 个集成 Python 脚本语法校验 | — | ✅ 通过 |
 | `crc16_known_vector` | Python 侧 CRC16 与 C 侧一致（`0x29B1`） | 1 | ✅ 通过 |
+| `shell_syntax_check` | `tools/gateway_stats.sh`、`run_e2e.sh`、`run_soak.sh` 语法校验 | — | ✅ 通过 |
 
 **valgrind @ unit_tests**（最新全量回归实测）：
 
 ```
 HEAP SUMMARY: in use at exit: 0 bytes in 0 blocks
-total heap usage: 23 allocs, 23 frees, 20,040 bytes allocated
+total heap usage: 24 allocs, 24 frees, 25,224 bytes allocated
 ERROR SUMMARY: 0 errors from 0 contexts
 ```
 

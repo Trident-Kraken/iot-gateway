@@ -74,6 +74,36 @@ int epoll_worker_request_send(int fd, uint64_t generation,
                               const uint8_t *frame, size_t len);
 
 /**
+ * @brief epoll I/O 线程统计快照。
+ */
+struct epoll_stats {
+    uint64_t active_conns;    /* 当前存活客户端连接数 */
+    uint64_t accepted_conns;  /* 累计成功接入连接数 */
+    uint64_t pool_rejected;   /* 连接池满（1024）拒绝次数 */
+    uint64_t downlink_sent;   /* 下行发送成功帧数 */
+    uint64_t downlink_failed; /* 下行发送失败或丢弃帧数 */
+};
+
+/**
+ * @brief 请求在事件循环安全上下文中输出统计快照（async-signal-safe，可供 SIGUSR1 调用）。
+ */
+void epoll_worker_request_stats(void);
+
+/**
+ * @brief 注册统计快照回调钩子（由 epoll 事件循环在安全线程上下文调用）。
+ *
+ * @param hook 回调函数指针（可为 NULL 表示取消）。
+ */
+void epoll_worker_set_stats_hook(void (*hook)(void));
+
+/**
+ * @brief 读取 epoll I/O 层的原子统计计数快照。
+ *
+ * @param out 输出结构体指针。
+ */
+void epoll_worker_get_stats(struct epoll_stats *out);
+
+/**
  * @brief 运行边缘触发（ET）模式的 epoll 事件循环。
  *
  * 本函数阻塞运行直到：收到优雅停机请求（epoll_worker_request_stop()，
