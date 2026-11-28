@@ -8,6 +8,7 @@
 #include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <time.h>
 #include <pthread.h>
 
@@ -23,6 +24,35 @@ static pthread_mutex_t g_log_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 /* 全局日志级别（也可由配置文件修改）。 */
 enum log_level g_log_level = LOG_LEVEL_INFO;
+
+/* 当日志文件缺失父目录（如首次克隆无 logs/）时尽力创建单层目录。 */
+static void ensure_parent_dir(const char *path)
+{
+    char dir_buf[1024];
+    const char *slash;
+    size_t dir_len;
+
+    if (path == NULL) {
+        return;
+    }
+
+    slash = strrchr(path, '/');
+    if (slash == NULL || slash == path) {
+        return;
+    }
+
+    dir_len = (size_t)(slash - path);
+    if (dir_len >= sizeof(dir_buf)) {
+        return;
+    }
+
+    memcpy(dir_buf, path, dir_len);
+    dir_buf[dir_len] = '\0';
+
+    if (mkdir(dir_buf, 0755) != 0 && errno != EEXIST) {
+        return;
+    }
+}
 
 int logger_init(const char *path, enum log_level level)
 {
@@ -40,6 +70,10 @@ int logger_init(const char *path, enum log_level level)
         g_log_fp = stderr;
     } else {
         g_log_fp = fopen(path, "a");
+        if (g_log_fp == NULL && errno == ENOENT) {
+            ensure_parent_dir(path);
+            g_log_fp = fopen(path, "a");
+        }
         if (g_log_fp == NULL) {
             /* 目录缺失或不可写：降级 stderr，避免网关无法启动。 */
             fprintf(stderr,
@@ -168,6 +202,8 @@ void logger_log(enum log_level level, const char *file, int line,
     struct tm tm_info;
     char time_buf[32];
     const char *level_str;
+    const char *base;
+    const char *short_file;
     va_list ap;
     char message[2048];
     int message_len;
@@ -177,12 +213,6 @@ void logger_log(enum log_level level, const char *file, int line,
        The actual write path below is fully serialized by g_log_mutex. */
     if (level < g_log_level) {
         return;
-    }
-
-    pthread_mutex_lock(&g_log_mutex);
-
-    if (g_log_fp == NULL) {
-        g_log_fp = stderr;
     }
 
     switch (level) {
@@ -200,6 +230,10 @@ void logger_log(enum log_level level, const char *file, int line,
         break;
     }
 
+    base = file != NULL ? strrchr(file, '/') : NULL;
+    short_file = base != NULL ? (base + 1) : (file != NULL ? file : "?");
+
+    /* 锁外完成时间格式化、路径精简与 vsnprintf，缩短 g_log_mutex 持有时间。 */
     now = time(NULL);
     localtime_r(&now, &tm_info);
     strftime(time_buf, sizeof(time_buf), "%Y-%m-%d %H:%M:%S", &tm_info);
@@ -209,13 +243,18 @@ void logger_log(enum log_level level, const char *file, int line,
     va_end(ap);
 
     if (message_len < 0) {
-        pthread_mutex_unlock(&g_log_mutex);
         return;
     }
 
     if ((size_t)message_len >= sizeof(message)) {
         message_len = (int)sizeof(message) - 1;
         message[message_len] = '\0';
+    }
+
+    pthread_mutex_lock(&g_log_mutex);
+
+    if (g_log_fp == NULL) {
+        g_log_fp = stderr;
     }
 
     /* 写前做简单的轮转检查。 */
@@ -227,7 +266,7 @@ void logger_log(enum log_level level, const char *file, int line,
 
     line_len = fprintf(g_log_fp,
                        "[%s] [%s] [%s:%d] %s\n",
-                       time_buf, level_str, file, line, message);
+                       time_buf, level_str, short_file, line, message);
 
     if (line_len > 0) {
         g_log_size += (size_t)line_len;

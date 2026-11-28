@@ -39,6 +39,16 @@ static void test_pipe_nonblocking(void)
     CHECK(flags != -1);
     CHECK((flags & O_NONBLOCK) != 0);
 
+    CHECK(fd_set_cloexec(fds[0]) == 0);
+    flags = fcntl(fds[0], F_GETFD, 0);
+    CHECK(flags != -1);
+    CHECK((flags & FD_CLOEXEC) != 0);
+
+    CHECK(fd_set_cloexec(fds[1]) == 0);
+    flags = fcntl(fds[1], F_GETFD, 0);
+    CHECK(flags != -1);
+    CHECK((flags & FD_CLOEXEC) != 0);
+
     close(fds[0]);
     close(fds[1]);
 }
@@ -47,6 +57,10 @@ static void test_invalid_fd(void)
 {
     errno = 0;
     CHECK(fd_set_nonblocking(-1) == -1);
+    CHECK(errno != 0);
+
+    errno = 0;
+    CHECK(fd_set_cloexec(-1) == -1);
     CHECK(errno != 0);
 }
 

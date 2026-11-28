@@ -110,7 +110,7 @@ static int is_valid_json_number(const char *s)
     return *s == '\0';
 }
 
-/* 清洗将放入 JSON 字符串字面量的文本：替换控制字符、引号与反斜杠，防 JSON 破坏。 */
+/* 清洗将放入 JSON 字符串字面量的文本：替换控制字符、非 ASCII 字节、引号与反斜杠。 */
 static void sanitize_json_string(char *s)
 {
     unsigned char *p;
@@ -120,7 +120,7 @@ static void sanitize_json_string(char *s)
     }
 
     for (p = (unsigned char *)s; *p != '\0'; p++) {
-        if (*p < 0x20u || *p == '"' || *p == '\\') {
+        if (*p < 0x20u || *p >= 0x7Fu || *p == '"' || *p == '\\') {
             *p = '_';
         }
     }
@@ -200,48 +200,56 @@ static int json_extract(const char *json, size_t json_len,
         return -1;
     }
 
-    if (*colon == '"') {
-        /* 字符串值: "xxx" —— 按 json_len 限界并跳过转义序列查找收尾引号。 */
-        colon++;
-        start = colon;
-        end = start;
-        while (end < json_end) {
-            if (*end == '\\') {
-                if (end + 1 >= json_end) {
-                    return -1;
+    {
+        int is_string = (*colon == '"');
+
+        if (is_string) {
+            /* 字符串值: "xxx" —— 按 json_len 限界并跳过转义序列查找收尾引号。 */
+            colon++;
+            start = colon;
+            end = start;
+            while (end < json_end) {
+                if (*end == '\\') {
+                    if (end + 1 >= json_end) {
+                        return -1;
+                    }
+                    end += 2;
+                    continue;
                 }
-                end += 2;
-                continue;
+                if (*end == '"') {
+                    break;
+                }
+                end++;
             }
-            if (*end == '"') {
-                break;
+            if (end >= json_end) {
+                return -1;
             }
-            end++;
+        } else {
+            /* 数字、布尔或原始 token：读到分隔符/空白为止，由调用方校验合法性。 */
+            start = colon;
+            end = start;
+            while (end < json_end && *end != ',' && *end != '}' && *end != ']' &&
+                   *end != ' ' && *end != '\t' && *end != '\r' && *end != '\n') {
+                end++;
+            }
         }
-        if (end >= json_end) {
+
+        if (end == start) {
             return -1;
         }
-    } else {
-        /* 数字、布尔或原始 token：读到分隔符/空白为止，由调用方校验合法性。 */
-        start = colon;
-        end = start;
-        while (end < json_end && *end != ',' && *end != '}' && *end != ']' &&
-               *end != ' ' && *end != '\t' && *end != '\r' && *end != '\n') {
-            end++;
-        }
-    }
 
-    if (end == start) {
-        return -1;
-    }
-
-    {
-        size_t copy_len = (size_t)(end - start);
-        if (copy_len >= val_size) {
-            copy_len = val_size - 1;
+        {
+            size_t copy_len = (size_t)(end - start);
+            /* 非字符串 token（如数字）禁止静默截断，防止改变数值语义。 */
+            if (!is_string && copy_len >= val_size) {
+                return -1;
+            }
+            if (copy_len >= val_size) {
+                copy_len = val_size - 1;
+            }
+            memcpy(val_buf, start, copy_len);
+            val_buf[copy_len] = '\0';
         }
-        memcpy(val_buf, start, copy_len);
-        val_buf[copy_len] = '\0';
     }
 
     return 0;
@@ -382,34 +390,23 @@ void handle_config(int fd, uint64_t generation,
                    const uint8_t *payload, size_t len)
 {
     const size_t config_len = sizeof(DEVICE_CONFIG_JSON) - 1;
-    struct packet *pkt;
     uint8_t frame[PROTOCOL_MAX_FRAME_SIZE];
     size_t frame_len;
 
     if (payload != NULL && len > 0) {
-        LOG_INFO("handle_config: fd=%d gen=%llu config request (%zu bytes)",
-                 fd, (unsigned long long)generation, len);
+        LOG_DEBUG("handle_config: fd=%d gen=%llu config request (%zu bytes)",
+                  fd, (unsigned long long)generation, len);
     } else {
-        LOG_INFO("handle_config: fd=%d gen=%llu config request (empty)",
-                 fd, (unsigned long long)generation);
+        LOG_DEBUG("handle_config: fd=%d gen=%llu config request (empty)",
+                  fd, (unsigned long long)generation);
     }
 
-    /* 组装 CMD_CONFIG 响应帧（柔性数组包）。 */
-    pkt = malloc(sizeof(*pkt) + config_len);
-    if (pkt == NULL) {
-        LOG_ERROR("handle_config: malloc failed for fd=%d", fd);
+    /* 栈上直接编码 CMD_CONFIG 响应帧，零堆分配。 */
+    if (packet_encode_raw(CMD_CONFIG, (const uint8_t *)DEVICE_CONFIG_JSON,
+                          (uint16_t)config_len, frame, sizeof(frame)) != 0) {
+        LOG_ERROR("handle_config: packet_encode_raw failed for fd=%d", fd);
         return;
     }
-    pkt->cmd = CMD_CONFIG;
-    pkt->payload_len = (uint16_t)config_len;
-    memcpy(pkt->payload, DEVICE_CONFIG_JSON, config_len);
-
-    if (packet_encode(pkt, frame, sizeof(frame)) != 0) {
-        LOG_ERROR("handle_config: packet_encode failed for fd=%d", fd);
-        free(pkt);
-        return;
-    }
-    free(pkt);
 
     frame_len = PACKET_MIN_SIZE + config_len;
 
@@ -419,8 +416,8 @@ void handle_config(int fd, uint64_t generation,
         return;
     }
 
-    LOG_INFO("handle_config: fd=%d config downlink queued (%zu bytes)",
-             fd, frame_len);
+    LOG_DEBUG("handle_config: fd=%d config downlink queued (%zu bytes)",
+              fd, frame_len);
 }
 
 /* =========================================================================

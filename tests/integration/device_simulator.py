@@ -181,26 +181,25 @@ class SensorDevice(threading.Thread):
         hex_bytes = ' '.join(f'{b:02X}' for b in frame)
         self.log(f"TX ({len(frame)} bytes): {hex_bytes}")
 
-    def run(self):
-        # Retry connection until success or stop.
-        sock = None
+    def _connect(self) -> socket.socket | None:
         while not self._stop_event.is_set():
             try:
                 sock = socket.create_connection((self.host, self.port),
                                                 timeout=5)
                 self.log(f"connected to {self.host}:{self.port}")
-                break
+                return sock
             except OSError as e:
                 self.connect_failures += 1
                 self.log(f"connect failed ({e}), retry in 2s")
                 self._stop_event.wait(2)
-        else:
-            return  # stop requested before connection
+        return None
+
+    def run(self):
+        sock = self._connect()
+        if sock is None:
+            return
 
         try:
-            time_base = time.time()
-            seq = 0
-
             while not self._stop_event.is_set():
                 ts = int(time.time())
 
@@ -212,27 +211,40 @@ class SensorDevice(threading.Thread):
                     if builder:
                         args = random_sensor_data(self.device_id, ts)
                         frame = builder(*args)
-                        self.send_frame(sock, frame)
-                        self.anomaly_count += 1
+                        try:
+                            self.send_frame(sock, frame)
+                            self.anomaly_count += 1
+                        except OSError as e:
+                            self.log(f"send error ({e}), reconnecting")
+                            sock.close()
+                            sock = self._connect()
+                            if sock is None:
+                                return
                         self._last_anomaly_time = now
-                        seq += 1
                         self._stop_event.wait(self.interval)
                         continue
 
                 # Normal frame.
                 args = random_sensor_data(self.device_id, ts)
                 frame = build_normal_frame(*args)
-                self.send_frame(sock, frame)
-                self.sent_count += 1
-                seq += 1
+                try:
+                    self.send_frame(sock, frame)
+                    self.sent_count += 1
+                except OSError as e:
+                    self.log(f"send error ({e}), reconnecting")
+                    sock.close()
+                    sock = self._connect()
+                    if sock is None:
+                        return
 
                 self._stop_event.wait(self.interval)
 
         finally:
-            try:
-                sock.close()
-            except OSError:
-                pass
+            if sock is not None:
+                try:
+                    sock.close()
+                except OSError:
+                    pass
 
 
 # ---------------------------------------------------------------------------

@@ -15,7 +15,8 @@ import tempfile
 import time
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-GW_BIN = os.path.join(ROOT, "build", "src", "iot-gateway")
+GW_BIN = os.environ.get("IOT_GATEWAY_BIN") or os.path.join(
+    ROOT, "build", "src", "iot-gateway")
 HOST = "127.0.0.1"
 
 

@@ -33,10 +33,9 @@ static void task_pool_init(void)
 {
     size_t i;
 
-    if (g_free_nodes != NULL) {
-        return;
-    }
-
+    /* 每次 init 均重建完整 2048 节点空闲链，防止 destroy 前若有未归还节点
+     * 导致二次 init 时对象池容量缩水。 */
+    g_free_nodes = NULL;
     for (i = 0; i < TASK_POOL_CAPACITY; i++) {
         g_task_pool[i].next = g_free_nodes;
         g_free_nodes = &g_task_pool[i];
@@ -136,7 +135,13 @@ int task_queue_push(const struct task *task)
     }
     g_free_nodes = node->next;
 
-    node->task = *task;
+    node->task.fd = task->fd;
+    node->task.generation = task->generation;
+    node->task.frame_len = task->frame_len;
+    node->task.cmd = task->cmd;
+    if (task->frame_len > 0) {
+        memcpy(node->task.frame, task->frame, task->frame_len);
+    }
     node->next = NULL;
 
     if (g_tail == NULL) {
@@ -202,14 +207,25 @@ struct task *task_queue_pop(void)
 void task_queue_release(struct task *task)
 {
     struct task_node *node;
+    uintptr_t addr;
+    uintptr_t base;
+    uintptr_t end;
 
-    if (task == NULL) {
+    if (!g_initialized || task == NULL) {
         return;
     }
 
     /* container_of：task 是 struct task_node 的首成员。 */
     node = (struct task_node *)((char *)task -
                                 offsetof(struct task_node, task));
+
+    addr = (uintptr_t)node;
+    base = (uintptr_t)&g_task_pool[0];
+    end  = (uintptr_t)&g_task_pool[TASK_POOL_CAPACITY];
+    if (addr < base || addr >= end ||
+        (addr - base) % sizeof(struct task_node) != 0) {
+        return;
+    }
 
     pthread_mutex_lock(&g_mutex);
     node->next = g_free_nodes;

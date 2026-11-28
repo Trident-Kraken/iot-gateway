@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <unistd.h>
 
 #include <stdint.h>
@@ -109,10 +110,8 @@ int main(int argc, char *argv[])
     int mqtt_qos;
     int listen_fd = -1;
 
-    (void)argc;
-    (void)argv;
-
-    config_path = DEFAULT_CONFIG_PATH;
+    config_path = (argc > 1 && argv[1] != NULL && argv[1][0] != '\0')
+                  ? argv[1] : DEFAULT_CONFIG_PATH;
 
     if (config_load(config_path) != 0) {
         fprintf(stderr, "failed to load config from %s\n", config_path);
@@ -127,6 +126,13 @@ int main(int argc, char *argv[])
         fprintf(stderr, "failed to initialize logger\n");
         config_free();
         return EXIT_FAILURE;
+    }
+
+    if (log_level_str != NULL &&
+        strcasecmp(log_level_str, "DEBUG") != 0 &&
+        strcasecmp(log_level_str, "INFO") != 0 &&
+        strcasecmp(log_level_str, "ERROR") != 0) {
+        LOG_ERROR("unknown log_level '%s', falling back to INFO", log_level_str);
     }
 
     if (ignore_sigpipe() != 0) {

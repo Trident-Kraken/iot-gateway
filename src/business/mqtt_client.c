@@ -64,10 +64,17 @@ static struct {
     /* 离线消息缓存：环形队列，满则淘汰最旧（broker 不可达时暂存消息）。 */
     struct {
         struct mqtt_cached_msg msgs[MQTT_CACHE_MAX];
-        size_t head;   /* 最旧消息下标（环形）。 */
-        size_t count;  /* 当前缓存条数。 */
+        size_t head;             /* 最旧消息下标（环形）。 */
+        size_t count;            /* 当前缓存条数。 */
+        int    overflow_warned;  /* 本轮断线期是否已记录满淘汰告警。 */
     } cache;
 } g_mqtt;
+
+enum mqtt_cache_status {
+    MQTT_CACHE_OK = 0,
+    MQTT_CACHE_EVICTED_FIRST = 1,
+    MQTT_CACHE_OOM = -1
+};
 
 /* =========================================================================
  * 内部辅助函数
@@ -77,21 +84,22 @@ static struct {
  * @brief 将消息加入离线缓存（调用方须持有 g_mqtt.lock）。
  *
  * 有界环形缓存：满时淘汰最旧、保留最新（传感器遥测场景最新值更有用）；
- * OOM 时丢弃新消息并记错误（fast-fail，不阻塞工作线程）。
+ * OOM 时返回 MQTT_CACHE_OOM（锁外再打日志，严禁持锁执行磁盘 I/O）。
  */
-static void mqtt_cache_enqueue_locked(const char *topic, const char *payload)
+static enum mqtt_cache_status mqtt_cache_enqueue_locked(const char *topic,
+                                                        const char *payload)
 {
     char *topic_copy;
     char *payload_copy;
     size_t tail;
+    enum mqtt_cache_status status = MQTT_CACHE_OK;
 
     topic_copy = strdup(topic);
     payload_copy = strdup(payload);
     if (topic_copy == NULL || payload_copy == NULL) {
         free(topic_copy);
         free(payload_copy);
-        LOG_ERROR("mqtt: cache enqueue OOM, message dropped (topic=%s)", topic);
-        return;
+        return MQTT_CACHE_OOM;
     }
 
     if (g_mqtt.cache.count == MQTT_CACHE_MAX) {
@@ -100,21 +108,26 @@ static void mqtt_cache_enqueue_locked(const char *topic, const char *payload)
         free(g_mqtt.cache.msgs[g_mqtt.cache.head].payload);
         g_mqtt.cache.head = (g_mqtt.cache.head + 1) % MQTT_CACHE_MAX;
         g_mqtt.cache.count--;
+        if (!g_mqtt.cache.overflow_warned) {
+            g_mqtt.cache.overflow_warned = 1;
+            status = MQTT_CACHE_EVICTED_FIRST;
+        }
     }
 
     tail = (g_mqtt.cache.head + g_mqtt.cache.count) % MQTT_CACHE_MAX;
     g_mqtt.cache.msgs[tail].topic = topic_copy;
     g_mqtt.cache.msgs[tail].payload = payload_copy;
     g_mqtt.cache.count++;
+    return status;
 }
 
 /**
  * @brief 将离线缓存中的消息全部提交给 libmosquitto 并释放缓存。
  *
  * 仅在管理线程连接成功后调用（此时 connected 仍为 0，新到达消息继续进入缓存，
- * 保持先旧后新顺序）。持锁摘下缓存后锁外发布；若全部冲刷完成，持锁置
- * connected=1；若中途 publish 失败，将未发送消息与新入队消息按时间顺序合并
- * 放回缓存（超限时淘汰最旧），置 connected=0 并返回 -1 由上层重连。
+ * 保持先旧后新顺序）。持锁摘下缓存后锁外发布；循环直至缓存真正清空后再
+ * 置 connected=1；若中途 publish 失败，将未发送消息与新入队消息按时间顺序
+ * 合并放回缓存（超限时淘汰最旧），置 connected=0 并返回 -1 由上层重连。
  */
 static int mqtt_cache_flush(struct mosquitto *mosq)
 {
@@ -122,9 +135,8 @@ static int mqtt_cache_flush(struct mosquitto *mosq)
     size_t count;
     size_t head;
     size_t i;
-    int round;
 
-    for (round = 0; round < 4; round++) {
+    for (;;) {
         pthread_mutex_lock(&g_mqtt.lock);
         if (g_mqtt.stop) {
             pthread_mutex_unlock(&g_mqtt.lock);
@@ -132,6 +144,7 @@ static int mqtt_cache_flush(struct mosquitto *mosq)
         }
         count = g_mqtt.cache.count;
         if (count == 0) {
+            g_mqtt.cache.overflow_warned = 0;
             g_mqtt.connected = 1;
             pthread_mutex_unlock(&g_mqtt.lock);
             return 0;
@@ -142,6 +155,7 @@ static int mqtt_cache_flush(struct mosquitto *mosq)
         }
         g_mqtt.cache.head = 0;
         g_mqtt.cache.count = 0;
+        g_mqtt.cache.overflow_warned = 0;
         pthread_mutex_unlock(&g_mqtt.lock);
 
         LOG_INFO("mqtt: flushing %zu cached message(s) after reconnect", count);
@@ -200,11 +214,6 @@ static int mqtt_cache_flush(struct mosquitto *mosq)
             free(msgs[i].payload);
         }
     }
-
-    pthread_mutex_lock(&g_mqtt.lock);
-    g_mqtt.connected = 1;
-    pthread_mutex_unlock(&g_mqtt.lock);
-    return 0;
 }
 
 /**
@@ -230,7 +239,7 @@ static void mqtt_backoff_sleep(void)
 {
     /* 退避 = base(1) + rand_r()%3 → 1~3 秒，jitter 避免多实例同时重连。 */
     unsigned int delay_sec = MQTT_RECONNECT_BASE_DELAY_SEC
-                             + (rand_r(&g_mqtt.rand_seed) % 3u);
+                             + ((unsigned int)rand_r(&g_mqtt.rand_seed) % 3u);
     unsigned int i;
 
     if (delay_sec > MQTT_RECONNECT_MAX_DELAY_SEC) {
@@ -388,6 +397,7 @@ int mqtt_client_init(const char *broker, int port, const char *client_id,
 
     g_mqtt.cache.head = 0;
     g_mqtt.cache.count = 0;
+    g_mqtt.cache.overflow_warned = 0;
     g_mqtt.connected = 0;
     g_mqtt.stop = 0;
     g_mqtt.initialized = 1;
@@ -412,6 +422,7 @@ int mqtt_client_init(const char *broker, int port, const char *client_id,
 int mqtt_publish(const char *topic, const char *payload)
 {
     struct mosquitto *mosq;
+    enum mqtt_cache_status cstatus;
     int rc;
     int mid;
 
@@ -425,14 +436,23 @@ int mqtt_publish(const char *topic, const char *payload)
         return -1;
     }
 
-    /* 锁内只做状态检查、缓存入队与句柄快照；网络调用在锁外执行。 */
+    /* 锁内只做状态检查、缓存入队与句柄快照；网络调用与日志 I/O 均在锁外执行。 */
     pthread_mutex_lock(&g_mqtt.lock);
     if (!g_mqtt.connected || g_mqtt.mosq == NULL) {
         /* 未连接：进入离线缓存，重连后由管理线程冲刷（不再丢消息）。 */
-        mqtt_cache_enqueue_locked(topic, payload);
+        cstatus = mqtt_cache_enqueue_locked(topic, payload);
         pthread_mutex_unlock(&g_mqtt.lock);
-        LOG_INFO("mqtt_publish: not connected, message cached (topic=%s)",
-                 topic);
+        if (cstatus == MQTT_CACHE_OOM) {
+            LOG_ERROR("mqtt: cache enqueue OOM, message dropped (topic=%s)",
+                      topic);
+        } else {
+            if (cstatus == MQTT_CACHE_EVICTED_FIRST) {
+                LOG_ERROR("mqtt: offline cache full (%d), evicting oldest "
+                          "messages", MQTT_CACHE_MAX);
+            }
+            LOG_DEBUG("mqtt_publish: not connected, message cached (topic=%s)",
+                      topic);
+        }
         return 0;
     }
     mosq = g_mqtt.mosq;
@@ -465,14 +485,24 @@ int mqtt_publish(const char *topic, const char *payload)
 
     pthread_mutex_lock(&g_mqtt.lock);
     g_mqtt.connected = 0;
-    mqtt_cache_enqueue_locked(topic, payload);
+    cstatus = mqtt_cache_enqueue_locked(topic, payload);
     pthread_mutex_unlock(&g_mqtt.lock);
+
+    if (cstatus == MQTT_CACHE_OOM) {
+        LOG_ERROR("mqtt: cache enqueue OOM, message dropped (topic=%s)", topic);
+    } else if (cstatus == MQTT_CACHE_EVICTED_FIRST) {
+        LOG_ERROR("mqtt: offline cache full (%d), evicting oldest messages",
+                  MQTT_CACHE_MAX);
+    }
 
     return 0;
 }
 
 void mqtt_client_destroy(void)
 {
+    struct mosquitto *mosq;
+    int was_connected;
+
     if (!g_mqtt.initialized) {
         return;
     }
@@ -492,19 +522,22 @@ void mqtt_client_destroy(void)
         g_mqtt.cache.head = (g_mqtt.cache.head + 1) % MQTT_CACHE_MAX;
         g_mqtt.cache.count--;
     }
+    g_mqtt.cache.overflow_warned = 0;
 
-    if (g_mqtt.mosq != NULL) {
-        /*
-         * mosquitto_disconnect() 发送 DISCONNECT 报文并等待完成。
-         * 若 Broker 已不可达，可改用 mosquitto_destroy() 强制释放；
-         * 当前选择优雅断开（退出路径，可接受短等待）。
-         */
-        mosquitto_disconnect(g_mqtt.mosq);
-        mosquitto_destroy(g_mqtt.mosq);
-        g_mqtt.mosq = NULL;
-    }
+    mosq = g_mqtt.mosq;
+    was_connected = g_mqtt.connected;
+    g_mqtt.mosq = NULL;
     g_mqtt.connected = 0;
     pthread_mutex_unlock(&g_mqtt.lock);
+
+    /* 锁外执行断开与释放：避免持锁调用网络/销毁路径。 */
+    if (mosq != NULL) {
+        if (was_connected) {
+            mosquitto_disconnect(mosq);
+            mosquitto_loop(mosq, 50, 1);
+        }
+        mosquitto_destroy(mosq);
+    }
 
     pthread_mutex_destroy(&g_mqtt.lock);
     free(g_mqtt.broker);

@@ -36,7 +36,8 @@ import tempfile
 import time
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-GW_BIN = os.path.join(ROOT, "build", "src", "iot-gateway")
+GW_BIN = os.environ.get("IOT_GATEWAY_BIN") or os.path.join(
+    ROOT, "build", "src", "iot-gateway")
 HOST = "127.0.0.1"
 PORT = 8083  # 与 E2E(8080)/生命周期(8081)/MQTT缓存(8082)错开
 
@@ -86,9 +87,19 @@ def build_frame(cmd: int = 0x02, payload: bytes = b"") -> bytes:
     return head + payload + struct.pack(">H", crc)
 
 
-def wait_port(port: int, timeout: float = 10.0) -> bool:
+def port_free(port: int) -> bool:
+    try:
+        with socket.create_connection((HOST, port), timeout=0.3):
+            return False
+    except OSError:
+        return True
+
+
+def wait_port(port: int, timeout: float = 10.0, proc=None) -> bool:
     deadline = time.time() + timeout
     while time.time() < deadline:
+        if proc is not None and proc.poll() is not None:
+            return False
         try:
             with socket.create_connection((HOST, port), timeout=0.5):
                 return True
@@ -160,6 +171,9 @@ def main() -> int:
     except OSError:
         print("[SKIP] 当前环境无法创建 socket")
         return 77
+    if not port_free(PORT):
+        print(f"[SKIP] 端口 {PORT} 已被占用")
+        return 77
 
     # --- 临时 cwd：最短心跳配置（interval=1/timeout=1），不改仓库 config/ ---
     tmp = tempfile.mkdtemp(prefix="iotgw_race_")
@@ -171,7 +185,7 @@ def main() -> int:
     gw = subprocess.Popen([GW_BIN], cwd=tmp,
                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     try:
-        if not wait_port(PORT):
+        if not wait_port(PORT, proc=gw):
             print("[FAIL] 网关未就绪")
             return 1
         time.sleep(1.0)  # 让 MQTT 管理线程/日志稳定，避免 fd 计数抖动

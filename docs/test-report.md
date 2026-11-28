@@ -24,29 +24,29 @@
 
 | 构建类型 | 编译选项 | CTest 结果 | 耗时 | Sanitizer / 备注 |
 |---|---|---|---|---|
-| **Release** | `-O2` | **16/16 PASS** | 98.83 s | 零警告；全部集成测试真实执行 |
-| **ASan + LSan** | `-fsanitize=address -fno-omit-frame-pointer -g -O1` | **16/16 PASS** | 98.72 s | `ASAN_OPTIONS=detect_leaks=1` 零越界、零泄漏报告 |
-| **TSan** | `-fsanitize=thread -g -O1` | **16/16 PASS** | 98.46 s | `TSAN_OPTIONS` 零数据竞争报告 |
+| **Release** | `-O2` | **16/16 PASS** | 99.98 s | 零警告；全部集成测试真实执行 |
+| **ASan + UBSan + LSan** | `-fsanitize=address,undefined -fno-omit-frame-pointer -g -O1` | **16/16 PASS** | 99.52 s | `ASAN_OPTIONS=detect_leaks=1:halt_on_error=1`、`UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1`，零越界、零泄漏、零 UB |
+| **TSan** | `-fsanitize=thread -fno-omit-frame-pointer -g -O1` | **16/16 PASS** | 99.25 s | `setarch $(uname -m) -R` 下执行，零数据竞争报告 |
 
 ### 单元测试明细
 
 | 用例 | 覆盖范围 | 断言数 | 结果 |
 |---|---|---|---|
-| `unit_tests` | CRC16 向量 / 编解码（含空指针与上限校验） / RingBuffer / 状态机拆包粘包坏帧 | 61 | ✅ 通过 |
+| `unit_tests` | CRC16 向量 / 编解码（含 `packet_encode_raw`、空指针与上限校验） / RingBuffer / 状态机拆包粘包坏帧及大载荷跨绕回分片批量读取 | 124 | ✅ 通过 |
 | `unit_config` | `config_parser`：trim / 行内注释 / 重复 key 覆盖 / 超长行丢弃 / 溢出与非法整数告警 | 34 | ✅ 通过 |
-| `unit_task_queue` | 对象池 FIFO / 有界水位线（2048 满拒入） / shutdown 语义 | 4115 | ✅ 通过 |
+| `unit_task_queue` | 对象池 FIFO / 有界水位线（2048 满拒入） / shutdown 语义 / 二次初始化完整池容量回归 | 8217 | ✅ 通过 |
 | `unit_threadpool` | NULL 回调拒绝 / 1000 任务全处理 / destroy 后提交拒绝 | 1006 | ✅ 通过 |
-| `unit_fd_util` | 非阻塞设置 / 非法 fd | 9 | ✅ 通过 |
-| `unit_ringbuffer_wrap` | head/tail 绕回、满拒写、跨数组边界读写完整性 | — | ✅ 通过 |
-| `unit_business` | JSON 同名 value 碰撞、RFC 8259 数字校验、字符串清洗、无 NUL 堆边界、`CMD_CONFIG`/`CMD_HEARTBEAT` 分发 | 40 | ✅ 通过 |
+| `unit_fd_util` | 非阻塞设置 / `FD_CLOEXEC` 设置 / 非法 fd | 17 | ✅ 通过 |
+| `unit_ringbuffer_wrap` | head/tail 绕回、满拒写、跨数组边界读写完整性 | 1672 | ✅ 通过 |
+| `unit_business` | JSON 同名 value 碰撞、RFC 8259 数字校验、超长数字拒绝、字符串清洗（含 `>=0x7F`）、无 NUL 堆边界、`CMD_CONFIG`/`CMD_HEARTBEAT` 分发 | 42 | ✅ 通过 |
 | `python_syntax_check` | 9 个集成 Python 脚本语法校验 | — | ✅ 通过 |
 | `crc16_known_vector` | Python 侧 CRC16 与 C 侧一致（`0x29B1`） | 1 | ✅ 通过 |
 
-**valgrind @ unit_tests**（v1.0.0 阶段基线实测）：
+**valgrind @ unit_tests**（最新全量回归实测）：
 
 ```
 HEAP SUMMARY: in use at exit: 0 bytes in 0 blocks
-total heap usage: 20 allocs, 20 frees, 19,425 bytes allocated
+total heap usage: 23 allocs, 23 frees, 20,040 bytes allocated
 ERROR SUMMARY: 0 errors from 0 contexts
 ```
 
@@ -125,12 +125,12 @@ python3 tests/integration/stress_test.py -c 100 -f 10 -d 60 --probe-interval 1.0
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build
 ctest --test-dir build --output-on-failure
 
-# ASan / TSan 回归
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DCMAKE_C_FLAGS="-Wall -Wextra -fsanitize=address -fno-omit-frame-pointer -g -O1" && cmake --build build
-ASAN_OPTIONS=detect_leaks=1 ctest --test-dir build --output-on-failure
+# ASan + UBSan / TSan 回归
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DCMAKE_C_FLAGS="-Wall -Wextra -fsanitize=address,undefined -fno-omit-frame-pointer -g -O1" && cmake --build build
+ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1 ctest --test-dir build --output-on-failure
 
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DCMAKE_C_FLAGS="-Wall -Wextra -fsanitize=thread -g -O1" && cmake --build build
-ctest --test-dir build --output-on-failure
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DCMAKE_C_FLAGS="-Wall -Wextra -fsanitize=thread -fno-omit-frame-pointer -g -O1" && cmake --build build
+setarch $(uname -m) -R ctest --test-dir build --output-on-failure
 
 # 压测与 Soak
 python3 tests/integration/stress_test.py -c 100 -f 10 -d 60 --probe-interval 1.0 -r /tmp/stress_large.txt

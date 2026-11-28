@@ -83,23 +83,24 @@ size_t packet_encoded_size(const struct packet *pkt)
     return PACKET_MIN_SIZE + pkt->payload_len;
 }
 
-int packet_encode(const struct packet *pkt, uint8_t *out, size_t out_len)
+int packet_encode_raw(uint8_t cmd, const uint8_t *payload, uint16_t payload_len,
+                      uint8_t *out, size_t out_len)
 {
     size_t total_len;
     uint16_t net_len;
     uint16_t crc;
 
-    if (pkt == NULL || out == NULL) {
+    if (out == NULL || (payload == NULL && payload_len > 0)) {
         errno = EINVAL;
         return -1;
     }
 
-    if (pkt->payload_len > PROTOCOL_MAX_PAYLOAD_LEN) {
+    if (payload_len > PROTOCOL_MAX_PAYLOAD_LEN) {
         errno = EMSGSIZE;
         return -1;
     }
 
-    total_len = packet_encoded_size(pkt);
+    total_len = PACKET_MIN_SIZE + (size_t)payload_len;
     if (out_len < total_len) {
         errno = ENOSPC;
         return -1;
@@ -110,15 +111,15 @@ int packet_encode(const struct packet *pkt, uint8_t *out, size_t out_len)
     out[1] = PACKET_HEADER_1;
 
     /* [2:3] Payload 长度，大端（网络字节序）。 */
-    net_len = htons(pkt->payload_len);
+    net_len = htons(payload_len);
     memcpy(&out[2], &net_len, sizeof(net_len));
 
     /* [4] 命令字节。 */
-    out[4] = pkt->cmd;
+    out[4] = cmd;
 
     /* [5:5+payload_len-1] Payload 字节。 */
-    if (pkt->payload_len > 0) {
-        memcpy(&out[5], pkt->payload, pkt->payload_len);
+    if (payload_len > 0) {
+        memcpy(&out[5], payload, payload_len);
     }
 
     /*
@@ -130,6 +131,17 @@ int packet_encode(const struct packet *pkt, uint8_t *out, size_t out_len)
     memcpy(&out[total_len - PACKET_CRC_SIZE], &crc, sizeof(crc));
 
     return 0;
+}
+
+int packet_encode(const struct packet *pkt, uint8_t *out, size_t out_len)
+{
+    if (pkt == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    return packet_encode_raw(pkt->cmd, pkt->payload, pkt->payload_len,
+                             out, out_len);
 }
 
 ssize_t packet_decode(const uint8_t *data, size_t len, struct packet **pkt)

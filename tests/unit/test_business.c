@@ -159,18 +159,35 @@ static void test_invalid_numbers_fallback(void)
     CHECK(g_mqtt_calls == 1);
     CHECK(strstr(g_last_mqtt_payload, "\"temp\":-12.5,") != NULL);
     CHECK(strstr(g_last_mqtt_payload, "\"hum\":1e2,") != NULL);
+
+    /* 超长数字 token（>= 64 字节）必须拒绝回退，不能静默截断。 */
+    {
+        char long_num_json[256];
+        char digits[72];
+
+        memset(digits, '9', sizeof(digits) - 1);
+        digits[sizeof(digits) - 1] = '\0';
+        snprintf(long_num_json, sizeof(long_num_json),
+                 "{\"device_id\":\"dev4\",\"temp\":%s,\"hum\":50,\"timestamp\":1}",
+                 digits);
+        reset_mocks();
+        handle_sensor_data(2, 23, (const uint8_t *)long_num_json,
+                           strlen(long_num_json));
+        CHECK(g_mqtt_calls == 1);
+        CHECK(strstr(g_last_mqtt_payload, "\"temp\":0.0,") != NULL);
+    }
 }
 
 static void test_device_id_sanitization(void)
 {
     const char *json =
-        "{\"device_id\":\"bad\\\"id\\\\x\x01\",\"temp\":21,\"hum\":50,\"timestamp\":1}";
+        "{\"device_id\":\"bad\\\"id\\\\x\x01\x7f\x80\xff\",\"temp\":21,\"hum\":50,\"timestamp\":1}";
 
     reset_mocks();
     handle_sensor_data(3, 30, (const uint8_t *)json, strlen(json));
 
     CHECK(g_mqtt_calls == 1);
-    CHECK(strstr(g_last_mqtt_payload, "\"device_id\":\"bad__id__x_\"") != NULL);
+    CHECK(strstr(g_last_mqtt_payload, "\"device_id\":\"bad__id__x____\"") != NULL);
 }
 
 static void test_non_nul_heap_payload(void)

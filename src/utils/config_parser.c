@@ -175,6 +175,14 @@ int config_load(const char *path)
         g_entry_count++;
     }
 
+    if (ferror(fp)) {
+        int err = errno;
+        fclose(fp);
+        config_free();
+        errno = err != 0 ? err : EIO;
+        return -1;
+    }
+
     fclose(fp);
     return 0;
 }

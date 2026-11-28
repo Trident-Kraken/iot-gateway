@@ -12,7 +12,7 @@ SAMPLES_SEC=10
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR"
-GATEWAY="$ROOT_DIR/build/src/iot-gateway"
+GATEWAY="${IOT_GATEWAY_BIN:-$ROOT_DIR/build/src/iot-gateway}"
 SIM="$ROOT_DIR/tests/integration/device_simulator.py"
 
 HOST=127.0.0.1

@@ -92,6 +92,21 @@ size_t packet_encoded_size(const struct packet *pkt);
 int packet_encode(const struct packet *pkt, uint8_t *out, size_t out_len);
 
 /**
+ * @brief 直接从原始字段编码协议帧（零动态分配，适合栈上缓冲发送）。
+ *
+ * 输出缓冲区依次填充：帧头、长度（大端）、命令字、Payload、CRC16（大端）。
+ *
+ * @param cmd         1 字节命令码。
+ * @param payload     Payload 字节首地址（payload_len == 0 时可为 NULL）。
+ * @param payload_len Payload 长度（不超过 PROTOCOL_MAX_PAYLOAD_LEN）。
+ * @param out         输出缓冲区。
+ * @param out_len     输出缓冲区大小（字节）。
+ * @return 成功返回 0，失败返回 -1 并设置 errno（EINVAL / EMSGSIZE / ENOSPC）。
+ */
+int packet_encode_raw(uint8_t cmd, const uint8_t *payload, uint16_t payload_len,
+                      uint8_t *out, size_t out_len);
+
+/**
  * @brief 从原始字节缓冲区解码一帧。
  *
  * 验证帧头，提取 Payload 长度，等待完整帧，校验 CRC16，然后分配

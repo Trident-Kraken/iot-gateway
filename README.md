@@ -160,7 +160,7 @@ iot-gateway/
 │   ├── gateway/                #   server / epoll_worker / conn_manager / heartbeat
 │   ├── protocol/               #   protocol / packet_parser
 │   ├── business/               #   business_handler / mqtt_client
-│   └── utils/                  #   ringbuffer / task_queue / threadpool / logger / config_parser
+│   └── utils/                  #   ringbuffer / task_queue / threadpool / fd_util / logger / config_parser
 ├── src/                        # 实现文件，与 include/ 分组镜像
 │   ├── gateway/  protocol/  business/  utils/
 ├── tests/

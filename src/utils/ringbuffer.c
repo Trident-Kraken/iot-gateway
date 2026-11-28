@@ -31,7 +31,7 @@ void rb_destroy(ringbuffer_t *rb)
 size_t rb_write(ringbuffer_t *rb, const void *data, size_t len)
 {
     const uint8_t *src;
-    size_t i;
+    size_t first;
 
     if (rb == NULL || data == NULL || len == 0) {
         return 0;
@@ -50,12 +50,17 @@ size_t rb_write(ringbuffer_t *rb, const void *data, size_t len)
     }
 
     src = data;
-
-    for (i = 0; i < len; i++) {
-        rb->buf[rb->head] = src[i];
-        rb->head = (rb->head + 1) % RB_CAPACITY;
+    first = RB_CAPACITY - rb->head;
+    if (first > len) {
+        first = len;
     }
 
+    memcpy(&rb->buf[rb->head], src, first);
+    if (len > first) {
+        memcpy(&rb->buf[0], src + first, len - first);
+    }
+
+    rb->head = (rb->head + len) % RB_CAPACITY;
     rb->len += len;
 
     return len;
@@ -65,7 +70,7 @@ size_t rb_read(ringbuffer_t *rb, void *buf, size_t len)
 {
     uint8_t *dst;
     size_t to_read;
-    size_t i;
+    size_t first;
 
     if (rb == NULL || buf == NULL) {
         errno = EINVAL;
@@ -73,13 +78,22 @@ size_t rb_read(ringbuffer_t *rb, void *buf, size_t len)
     }
 
     to_read = len < rb->len ? len : rb->len;
-
-    dst = buf;
-    for (i = 0; i < to_read; i++) {
-        dst[i] = rb->buf[rb->tail];
-        rb->tail = (rb->tail + 1) % RB_CAPACITY;
+    if (to_read == 0) {
+        return 0;
     }
 
+    dst = buf;
+    first = RB_CAPACITY - rb->tail;
+    if (first > to_read) {
+        first = to_read;
+    }
+
+    memcpy(dst, &rb->buf[rb->tail], first);
+    if (to_read > first) {
+        memcpy(dst + first, &rb->buf[0], to_read - first);
+    }
+
+    rb->tail = (rb->tail + to_read) % RB_CAPACITY;
     rb->len -= to_read;
 
     return to_read;
@@ -89,8 +103,7 @@ size_t rb_peek(const ringbuffer_t *rb, void *buf, size_t len)
 {
     uint8_t *dst;
     size_t to_peek;
-    size_t i;
-    size_t pos;
+    size_t first;
 
     if (rb == NULL || buf == NULL) {
         errno = EINVAL;
@@ -98,12 +111,19 @@ size_t rb_peek(const ringbuffer_t *rb, void *buf, size_t len)
     }
 
     to_peek = len < rb->len ? len : rb->len;
+    if (to_peek == 0) {
+        return 0;
+    }
 
     dst = buf;
-    pos = rb->tail;
-    for (i = 0; i < to_peek; i++) {
-        dst[i] = rb->buf[pos];
-        pos = (pos + 1) % RB_CAPACITY;
+    first = RB_CAPACITY - rb->tail;
+    if (first > to_peek) {
+        first = to_peek;
+    }
+
+    memcpy(dst, &rb->buf[rb->tail], first);
+    if (to_peek > first) {
+        memcpy(dst + first, &rb->buf[0], to_peek - first);
     }
 
     return to_peek;

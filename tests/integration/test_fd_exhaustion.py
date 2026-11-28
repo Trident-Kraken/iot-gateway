@@ -22,9 +22,10 @@ import tempfile
 import time
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-GW_BIN = os.path.join(ROOT, "build", "src", "iot-gateway")
+GW_BIN = os.environ.get("IOT_GATEWAY_BIN") or os.path.join(
+    ROOT, "build", "src", "iot-gateway")
 HOST = "127.0.0.1"
-PORT = 8084  # 与 8080/8081/8082/8083 错开
+PORT = 8085  # 与 8080/8081/8082/8083/8084 错开
 
 NOFILE_LIMIT = 96   # 网关进程 fd 上限（含 stdio/listen/epoll/pipe/log 等开销）
 CLIENTS = 120       # > NOFILE_LIMIT，必然触发 EMFILE
@@ -71,9 +72,19 @@ def build_frame(cmd: int = 0x03, payload: bytes = b"") -> bytes:
     return head + payload + struct.pack(">H", crc)
 
 
-def wait_port(port: int, timeout: float = 10.0) -> bool:
+def port_free(port: int) -> bool:
+    try:
+        with socket.create_connection((HOST, port), timeout=0.3):
+            return False
+    except OSError:
+        return True
+
+
+def wait_port(port: int, timeout: float = 10.0, proc=None) -> bool:
     deadline = time.time() + timeout
     while time.time() < deadline:
+        if proc is not None and proc.poll() is not None:
+            return False
         try:
             with socket.create_connection((HOST, port), timeout=0.5):
                 return True
@@ -126,6 +137,9 @@ def main() -> int:
     if soft != resource.RLIM_INFINITY and soft < NOFILE_LIMIT:
         print(f"[SKIP] 当前环境 RLIMIT_NOFILE={soft} 低于测试所需 {NOFILE_LIMIT}")
         return 77
+    if not port_free(PORT):
+        print(f"[SKIP] 端口 {PORT} 已被占用")
+        return 77
 
     # --- 临时 cwd + 低 ulimit 网关 ---
     tmp = tempfile.mkdtemp(prefix="iotgw_fdex_")
@@ -137,7 +151,7 @@ def main() -> int:
                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     clients = []
     try:
-        if not wait_port(PORT):
+        if not wait_port(PORT, proc=gw):
             print("[FAIL] 网关未就绪（低 ulimit 下启动失败？）")
             return 1
         time.sleep(0.5)

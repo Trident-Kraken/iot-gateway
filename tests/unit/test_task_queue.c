@@ -116,12 +116,49 @@ static void test_shutdown(void)
     task_queue_destroy();
 }
 
+static void test_reinit_full_pool(void)
+{
+    int i;
+    struct task *leaked;
+
+    /* 模拟 destroy 前存在未归还节点，二次 init 仍应恢复完整 2048 容量。 */
+    CHECK(task_queue_init() == 0);
+    {
+        struct task tk = make_task(0x41);
+        CHECK(task_queue_push(&tk) == 0);
+        leaked = task_queue_pop();
+        CHECK(leaked != NULL);
+    }
+    task_queue_shutdown();
+    task_queue_destroy();
+
+    CHECK(task_queue_init() == 0);
+    for (i = 0; i < 2048; i++) {
+        struct task tk = make_task((uint8_t)(i & 0xFF));
+        CHECK(task_queue_push(&tk) == 0);
+    }
+    {
+        struct task tk = make_task(0xFF);
+        errno = 0;
+        CHECK(task_queue_push(&tk) == -1);
+        CHECK(errno == ENOMEM);
+    }
+    for (i = 0; i < 2048; i++) {
+        struct task *t = task_queue_pop();
+        CHECK(t != NULL);
+        task_queue_release(t);
+    }
+    task_queue_shutdown();
+    task_queue_destroy();
+}
+
 int main(void)
 {
     test_fifo_order();
     test_invalid_frame_len();
     test_pool_exhaustion_and_reuse();
     test_shutdown();
+    test_reinit_full_pool();
 
     printf("unit_task_queue: %d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;

@@ -82,12 +82,12 @@ I/O 线程负责网络收发、拆包、CRC 校验，在入队前丢弃坏帧；
 | 模块 | 所属线程 | 输入 | 输出 | 持有锁 |
 |---|---|---|---|---|
 | **server** | main 线程 | config (port) | listen_fd | 无 |
-| **epoll_worker** | I/O 线程 | listen_fd, client_fd | 触发 recv/accept | 无（epoll 内在同步） |
-| **ringbuffer** | I/O 线程（写） / I/O 线程（读） | 原始字节流 | 按字节读出 | 无（SPSC 无锁） |
-| **packet_parser** | I/O 线程 | RingBuffer 单字节 | 完整帧 (on_frame_complete) | 无 |
-| **protocol** | I/O 线程 / 工作线程 | 帧字节 / 帧字段 | CRC 验证 / 编码后的帧 | 无（纯函数） |
-| **conn_manager** | 多线程 | fd, last_active | 连接链表 CRUD | `g_mutex` |
-| **heartbeat** | 独立心跳线程 | 连接链表 | 超时 fd（两段收集，写 self-pipe） | `g_mutex`（遍历时持有） |
+| **epoll_worker** | I/O 线程 | listen_fd, client_fd | 触发 recv/accept（双向链表 + 1024 桶 O(1) 查找） | 无（epoll 内在同步） |
+| **ringbuffer** | I/O 线程（写） / I/O 线程（读） | 原始字节流 | 双段 `memcpy` 读写 | 无（SPSC 无锁） |
+| **packet_parser** | I/O 线程 | RingBuffer 字节流 | 完整帧 (on_frame_complete，1024 桶 O(1) 查找 + 载荷批量读取) | 无 |
+| **protocol** | I/O 线程 / 工作线程 | 帧字节 / 帧字段 | CRC 验证 / 编码后的帧（含 `packet_encode_raw`） | 无（纯函数） |
+| **conn_manager** | 多线程 | fd, last_active（`CLOCK_MONOTONIC`） | 1024 桶哈希表 CRUD | `g_mutex` |
+| **heartbeat** | 独立心跳线程 | 连接表（`CLOCK_MONOTONIC`） | 超时 fd（两段分批收集，写 self-pipe） | `g_mutex`（遍历时持有） |
 | **task_queue** | I/O 线程（写） / 工作线程（读） | struct task | 线程安全 FIFO | `g_mutex + g_cond` |
 | **threadpool** | 工作线程 ×N | task_queue_pop | worker_process_task | 无（任务队列在 pop 内部持锁） |
 | **business_handler** | 工作线程 | 完整帧 | JSON / MQTT publish | 无（MQTT 模块自行保护） |
@@ -117,8 +117,9 @@ epoll 线程：epoll_wait 以 500ms 超时轮询感知标志
 ↓ 处理完当前事件批（conn_pool_flush_trash 归还批内关闭槽位）
 关闭全部存活客户端连接（统一走 connection_close 清理路径）
 ↓ epoll_worker_run 返回 0
-main：按初始化逆序清理（heartbeat_stop → epoll pipe → threadpool →
-      mqtt_client（含离线缓存残留释放）→ conn_manager → logger → config）
+main：按初始化逆序清理（server_close → heartbeat_stop → threadpool_destroy →
+      epoll_worker_destroy → mqtt_client_destroy（含离线缓存残留释放）→
+      conn_manager_destroy → logger_destroy → config_free）
 ↓ exit 0
 ```
 

@@ -15,9 +15,9 @@ Protocol frame layout (big-endian, must match protocol.h exactly):
      5+N     2    CRC16-CCITT-FALSE over [length + command + payload]
 
 Usage:
-    python3 tests/stress_test.py                          # defaults: 100 conn, 10 fps, 60s
-    python3 tests/stress_test.py --connections 500 --fps 20 --duration 120
-    python3 tests/stress_test.py --host 192.168.1.100 --port 8080 --connections 50
+    python3 tests/integration/stress_test.py                          # defaults: 100 conn, 10 fps, 60s
+    python3 tests/integration/stress_test.py --connections 500 --fps 20 --duration 120
+    python3 tests/integration/stress_test.py --host 192.168.1.100 --port 8080 --connections 50
 """
 
 import argparse
@@ -143,6 +143,7 @@ class GlobalMetrics:
     total_connect_errors: int = 0
     total_send_errors: int = 0
     all_latencies: list = field(default_factory=list)
+    _sorted_cache: Optional[list] = field(default=None, init=False, repr=False)
 
     @property
     def duration(self) -> float:
@@ -176,7 +177,9 @@ class GlobalMetrics:
     def _percentile(self, pct: float) -> Optional[float]:
         if not self.all_latencies:
             return None
-        latencies = sorted(self.all_latencies)
+        if self._sorted_cache is None or len(self._sorted_cache) != len(self.all_latencies):
+            self._sorted_cache = sorted(self.all_latencies)
+        latencies = self._sorted_cache
         idx = int(len(latencies) * pct / 100.0)
         if idx >= len(latencies):
             idx = len(latencies) - 1
@@ -661,7 +664,7 @@ async def main_async(args):
         connection_tasks = tasks
         await asyncio.wait_for(
             asyncio.gather(*connection_tasks),
-            timeout=args.duration,
+            timeout=args.duration + 2.0,
         )
     except asyncio.TimeoutError:
         pass

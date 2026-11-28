@@ -7,7 +7,7 @@ set -u
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR"   # 网关以仓库根为 cwd（依赖 config/、logs/ 相对路径）
 
-GATEWAY="$ROOT_DIR/build/src/iot-gateway"
+GATEWAY="${IOT_GATEWAY_BIN:-$ROOT_DIR/build/src/iot-gateway}"
 SIM="$ROOT_DIR/tests/integration/device_simulator.py"
 CFG_TEST="$ROOT_DIR/tests/integration/config_downlink_test.py"
 GW_LOG="/tmp/iotgw_e2e_gw.log"

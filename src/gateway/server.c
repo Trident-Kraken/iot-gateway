@@ -6,6 +6,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/types.h>
@@ -60,8 +61,9 @@ int server_init(uint16_t port)
         return -1;
     }
 
-    if (fd_set_nonblocking(listen_fd) == -1) {
-        LOG_ERROR("server_init: fd_set_nonblocking failed: %s",
+    if (fd_set_nonblocking(listen_fd) == -1 ||
+        fd_set_cloexec(listen_fd) == -1) {
+        LOG_ERROR("server_init: fd_set_nonblocking/cloexec failed: %s",
               strerror(errno));
         close(listen_fd);
         return -1;
@@ -203,11 +205,21 @@ int server_accept(int listen_fd)
         break;
     }
 
-    if (fd_set_nonblocking(client_fd) == -1) {
-        LOG_ERROR("server_accept: fd_set_nonblocking failed: %s",
+    if (fd_set_nonblocking(client_fd) == -1 ||
+        fd_set_cloexec(client_fd) == -1) {
+        LOG_ERROR("server_accept: fd_set_nonblocking/cloexec failed: %s",
               strerror(errno));
         close(client_fd);
         return -1;
+    }
+
+    {
+        int nodelay = 1;
+        if (setsockopt(client_fd, IPPROTO_TCP, TCP_NODELAY,
+                       &nodelay, sizeof(nodelay)) == -1) {
+            LOG_DEBUG("server_accept: setsockopt TCP_NODELAY failed fd=%d: %s",
+                      client_fd, strerror(errno));
+        }
     }
 
     return client_fd;

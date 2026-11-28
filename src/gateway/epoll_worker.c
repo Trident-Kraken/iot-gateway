@@ -18,6 +18,7 @@
 #include "utils/logger.h"
 #include "utils/threadpool.h"
 #include "protocol/packet_parser.h"
+#include "protocol/protocol.h"
 #include "gateway/server.h"
 
 /* 每次 epoll_wait() 调用处理的最大事件数。*/
@@ -37,9 +38,18 @@ static int g_close_pipe[2] = { -1, -1 };
  * 与普通代码共享标志的标准类型（单字读写原子，async-signal-safe）。 */
 static volatile sig_atomic_t g_stop_requested = 0;
 
-/* Singly-linked list of active client connections, for fd->conn lookup.
+/* Doubly-linked list of active client connections (O(1) removal).
  * Only accessed by the epoll thread, no lock needed. */
 static struct connection *g_conn_list = NULL;
+
+/* Client fd hash table (2^k buckets, O(1) lookup by fd, epoll thread only). */
+#define CONN_HASH_BUCKETS 1024u
+static struct connection *g_conn_buckets[CONN_HASH_BUCKETS];
+
+static size_t conn_hash_bucket(int fd)
+{
+    return (size_t)(((unsigned int)fd) & (CONN_HASH_BUCKETS - 1u));
+}
 
 /**
  * @brief 存储在 epoll_event.data.ptr 中的每连接上下文。
@@ -62,7 +72,9 @@ struct connection {
      * 见 connection_close 与事件分发处的设计说明）。对象池 acquire
      * 时的 memset 会把它清零，新连接天然为“未关闭”。 */
     int       closed;
-    struct connection *next; /* singly-linked list of client connections */
+    struct connection *next;      /* 活跃双向链 next / 空闲链与 trash 链指针 */
+    struct connection *prev;      /* 活跃双向链 prev（O(1) 删除） */
+    struct connection *hash_next; /* fd 哈希桶链表指针（O(1) 查找） */
 };
 
 /* 连接代际计数器（仅 epoll 线程访问，无需加锁）。 */
@@ -172,34 +184,74 @@ _Static_assert(sizeof(struct pipe_msg) <= PIPE_BUF,
                "struct pipe_msg must fit in PIPE_BUF for atomic pipe writes");
 
 /* =========================================================================
- * Connection list helpers (epoll thread only, no lock needed)
+ * Connection list & hash helpers (epoll thread only, no lock needed)
  * ========================================================================= */
 
 static void conn_list_add(struct connection *conn)
 {
+    size_t bucket = conn_hash_bucket(conn->fd);
+
+    conn->prev = NULL;
     conn->next = g_conn_list;
+    if (g_conn_list != NULL) {
+        g_conn_list->prev = conn;
+    }
     g_conn_list = conn;
+
+    conn->hash_next = g_conn_buckets[bucket];
+    g_conn_buckets[bucket] = conn;
 }
 
 static void conn_list_remove(struct connection *conn)
 {
-    struct connection **pp = &g_conn_list;
+    struct connection **pp;
+
+    if (conn->prev != NULL) {
+        conn->prev->next = conn->next;
+    } else if (g_conn_list == conn) {
+        g_conn_list = conn->next;
+    }
+    if (conn->next != NULL) {
+        conn->next->prev = conn->prev;
+    }
+    conn->prev = NULL;
+    conn->next = NULL;
+
+    pp = &g_conn_buckets[conn_hash_bucket(conn->fd)];
     while (*pp != NULL) {
         if (*pp == conn) {
-            *pp = conn->next;
+            *pp = conn->hash_next;
+            conn->hash_next = NULL;
             return;
         }
-        pp = &(*pp)->next;
+        pp = &(*pp)->hash_next;
     }
+}
+
+static struct connection *conn_find_by_fd(int fd)
+{
+    struct connection *conn;
+
+    if (fd < 0) {
+        return NULL;
+    }
+
+    for (conn = g_conn_buckets[conn_hash_bucket(fd)];
+         conn != NULL;
+         conn = conn->hash_next) {
+        if (conn->fd == fd && !conn->closed) {
+            return conn;
+        }
+    }
+    return NULL;
 }
 
 static struct connection *conn_list_find(int fd, uint64_t generation)
 {
-    struct connection *conn;
-    for (conn = g_conn_list; conn != NULL; conn = conn->next) {
-        if (conn->fd == fd && conn->generation == generation) {
-            return conn;
-        }
+    struct connection *conn = conn_find_by_fd(fd);
+
+    if (conn != NULL && conn->generation == generation) {
+        return conn;
     }
     return NULL;
 }
@@ -223,8 +275,10 @@ int epoll_worker_init(void)
     }
 
     if (fd_set_nonblocking(g_close_pipe[0]) == -1 ||
-        fd_set_nonblocking(g_close_pipe[1]) == -1) {
-        LOG_ERROR("epoll_worker_init: fd_set_nonblocking failed: %s",
+        fd_set_nonblocking(g_close_pipe[1]) == -1 ||
+        fd_set_cloexec(g_close_pipe[0]) == -1 ||
+        fd_set_cloexec(g_close_pipe[1]) == -1) {
+        LOG_ERROR("epoll_worker_init: fd_set_nonblocking/cloexec failed: %s",
                   strerror(errno));
         close(g_close_pipe[0]);
         close(g_close_pipe[1]);
@@ -281,7 +335,10 @@ void epoll_worker_request_close(int fd, uint64_t generation)
     msg.generation = generation;
     msg.len = 0;
 
-    ssize_t n = write(g_close_pipe[1], &msg, sizeof(msg));
+    ssize_t n;
+    do {
+        n = write(g_close_pipe[1], &msg, sizeof(msg));
+    } while (n == -1 && errno == EINTR);
     if (n == -1) {
         if (errno != EAGAIN && errno != EWOULDBLOCK) {
             LOG_ERROR("epoll_worker_request_close: pipe write failed fd=%d: %s",
@@ -317,7 +374,10 @@ int epoll_worker_request_send(int fd, uint64_t generation,
     msg.len = (uint16_t)len;
     memcpy(msg.data, frame, len);
 
-    ssize_t n = write(g_close_pipe[1], &msg, sizeof(msg));
+    ssize_t n;
+    do {
+        n = write(g_close_pipe[1], &msg, sizeof(msg));
+    } while (n == -1 && errno == EINTR);
     if (n != (ssize_t)sizeof(msg)) {
         LOG_ERROR("epoll_worker_request_send: pipe write failed fd=%d: %s",
                   fd, strerror(errno));
@@ -380,8 +440,10 @@ static void connection_close(int epoll_fd, struct connection *conn)
 
     conn->closed = 1;
 
-    /* Remove from the client connection list. */
-    conn_list_remove(conn);
+    /* Remove from the client connection list & hash table. */
+    if (conn->role == CONN_ROLE_CLIENT) {
+        conn_list_remove(conn);
+    }
 
     if (epoll_ctl(epoll_fd, EPOLL_CTL_DEL, conn->fd, NULL) == -1) {
         /*
@@ -510,6 +572,7 @@ static void handle_listen(int epoll_fd, int listen_fd)
 static void handle_client(int epoll_fd, struct connection *conn)
 {
     char recv_buf[4096];
+    int received_any = 0;
 
     for (;;) {
         ssize_t n;
@@ -527,9 +590,7 @@ static void handle_client(int epoll_fd, struct connection *conn)
                 return;
             }
 
-            /* 更新该连接的心跳活动时间戳。*/
-            conn_manager_update_active_time(conn->fd);
-
+            received_any = 1;
             continue;
         }
 
@@ -541,7 +602,10 @@ static void handle_client(int epoll_fd, struct connection *conn)
 
         /* n == -1 */
         if (errno == EAGAIN || errno == EWOULDBLOCK) {
-            /* 内核接收缓冲区已完全排空。*/
+            /* 内核接收缓冲区已完全排空；合并刷新一次心跳活动时间戳。*/
+            if (received_any) {
+                conn_manager_update_active_time(conn->fd);
+            }
             return;
         }
 
@@ -602,8 +666,10 @@ static void handle_pipe_messages(int epoll_fd)
             } else if (msg->type == PIPE_MSG_SEND) {
                 /* 下行发送：best-effort。socket 非阻塞，缓冲区满（EAGAIN）
                  * 或连接已断开时直接丢弃并记日志，配置响应可重发。 */
-                ssize_t sent = send(conn->fd, msg->data, msg->len,
-                                    MSG_NOSIGNAL);
+                ssize_t sent;
+                do {
+                    sent = send(conn->fd, msg->data, msg->len, MSG_NOSIGNAL);
+                } while (sent == -1 && errno == EINTR);
                 if (sent < 0) {
                     LOG_ERROR("epoll: send downlink fd=%d failed: %s",
                               msg->fd, strerror(errno));
@@ -611,8 +677,8 @@ static void handle_pipe_messages(int epoll_fd)
                     LOG_ERROR("epoll: send downlink fd=%d partial (%zd/%u bytes)",
                               msg->fd, sent, (unsigned int)msg->len);
                 } else {
-                    LOG_INFO("epoll: sent downlink frame to fd=%d (%u bytes)",
-                             msg->fd, (unsigned int)msg->len);
+                    LOG_DEBUG("epoll: sent downlink frame to fd=%d (%u bytes)",
+                              msg->fd, (unsigned int)msg->len);
                 }
             }
         }
@@ -790,21 +856,19 @@ int epoll_worker_run(int listen_fd)
 void on_frame_complete(int fd, const uint8_t *frame, size_t len)
 {
     struct task t;
+    struct connection *conn;
 
-    if (frame == NULL || len == 0 || len > sizeof(t.frame)) {
-        LOG_ERROR("on_frame_complete: invalid frame from fd=%d", fd);
+    if (frame == NULL || len < PACKET_MIN_SIZE || len > sizeof(t.frame)) {
+        LOG_ERROR("on_frame_complete: invalid frame from fd=%d len=%zu",
+                  fd, len);
         return;
     }
 
-    memset(&t, 0, sizeof(t));
     t.fd = fd;
 
-    /* 记录连接代际号：下行响应（如 CMD_CONFIG）发送前据此防 fd 复用误发。 */
-    if (conn_manager_get_generation(fd, &t.generation) != 0) {
-        /* 理论上不会发生（本回调运行在 epoll 线程、连接尚存活）；
-         * 防御性置 0，使后续下行发送被 generation 匹配拒绝。 */
-        t.generation = 0;
-    }
+    /* 直接在 epoll 线程 O(1) 无锁获取代际号，消除每帧互斥锁竞争。 */
+    conn = conn_find_by_fd(fd);
+    t.generation = (conn != NULL) ? conn->generation : 0;
 
     t.frame_len = len;
     memcpy(t.frame, frame, len);

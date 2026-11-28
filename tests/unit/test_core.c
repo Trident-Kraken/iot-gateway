@@ -134,6 +134,25 @@ static void test_packet_encode_verify(void)
         CHECK(errno == EMSGSIZE);
         free(pkt);
     }
+
+    /* packet_encode_raw：空 payload 与常规 payload 零堆分配编码。 */
+    {
+        uint8_t raw_frame[PROTOCOL_MAX_FRAME_SIZE];
+        struct packet *decoded = NULL;
+
+        CHECK(packet_encode_raw(CMD_HEARTBEAT, NULL, 0,
+                                raw_frame, sizeof(raw_frame)) == 0);
+        CHECK(packet_checksum_verify(raw_frame, PACKET_MIN_SIZE) == 1);
+
+        CHECK(packet_encode_raw(CMD_CONFIG, (const uint8_t *)"abc", 3,
+                                raw_frame, sizeof(raw_frame)) == 0);
+        CHECK(packet_decode(raw_frame, PACKET_MIN_SIZE + 3, &decoded) ==
+              (ssize_t)(PACKET_MIN_SIZE + 3));
+        CHECK(decoded != NULL && decoded->cmd == CMD_CONFIG);
+        CHECK(decoded->payload_len == 3 &&
+              memcmp(decoded->payload, "abc", 3) == 0);
+        free(decoded);
+    }
 }
 
 static void test_packet_decode(void)
@@ -280,9 +299,35 @@ static void test_packet_parser(void)
     CHECK(packet_parser_feed(1, frame1, len1) == -1);
     CHECK(errno == ENOENT);
 
-    /* 未注册 fd 的 register 会正常创建。 */
-    CHECK(packet_parser_register(7, NULL) == 0);
-    packet_parser_unregister(7);
+    /* 大载荷（600B）多轮分片送达，跨 4KB RingBuffer 绕回边界验证批量读取。 */
+    {
+        uint8_t big_payload[600];
+        uint8_t big_frame[PROTOCOL_MAX_FRAME_SIZE];
+        size_t big_len;
+        int r;
+
+        for (size_t k = 0; k < sizeof(big_payload); k++) {
+            big_payload[k] = (uint8_t)(k & 0xFF);
+        }
+        big_len = build_frame(CMD_SENSOR_DATA, big_payload, sizeof(big_payload),
+                              big_frame, sizeof(big_frame));
+        CHECK(big_len == PACKET_MIN_SIZE + sizeof(big_payload));
+
+        g_frame_count = 0;
+        CHECK(packet_parser_register(7, NULL) == 0);
+        for (r = 0; r < 8; r++) {
+            size_t off = 0;
+            while (off < big_len) {
+                size_t chunk = (big_len - off) > 137 ? 137 : (big_len - off);
+                CHECK(packet_parser_feed(7, big_frame + off, chunk) == 0);
+                off += chunk;
+            }
+            CHECK(g_frame_count == r + 1);
+            CHECK(g_last_len == big_len &&
+                  memcmp(g_last_frame, big_frame, big_len) == 0);
+        }
+        packet_parser_unregister(7);
+    }
 
 }
 

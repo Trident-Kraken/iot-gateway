@@ -28,3 +28,15 @@ jobs:
         # 配置校验/故障注入/超时关闭竞态回归/fd 耗尽处理）；
         # 依赖缺失或环境受限时用例返回 77 被跳过。
         run: ctest --test-dir build --output-on-failure
+
+      - name: Configure (ASan + UBSan + LSan)
+        run: cmake -S . -B build-asan -DCMAKE_BUILD_TYPE=Debug -DCMAKE_C_FLAGS="-Wall -Wextra -fsanitize=address,undefined -fno-omit-frame-pointer -g -O1"
+
+      - name: Build (ASan + UBSan + LSan)
+        run: cmake --build build-asan
+
+      - name: CTest (ASan + UBSan + LSan)
+        env:
+          ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+        run: ctest --test-dir build-asan --output-on-failure

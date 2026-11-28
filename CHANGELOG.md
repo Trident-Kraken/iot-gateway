@@ -5,6 +5,13 @@
 
 ## [Unreleased]
 
+### 修复与优化
+
+- `fix(build/ci)`: 修复 `CMakeLists.txt` 覆盖外部 `CMAKE_C_FLAGS` 导致 Sanitizer 构建未生效的问题；CI 新增真实 ASan+UBSan+LSan 回归门槛。
+- `fix(gateway/mqtt/utils)`: 心跳活跃时间戳与超时判定改用 `CLOCK_MONOTONIC` 免疫系统时钟跳变；心跳批关闭上限调整为 48 并支持多轮排空防止撑爆 self-pipe；修复 `mqtt_cache_flush()` 仅循环 4 轮可能遗留离线缓存、持 `g_mqtt.lock` 期间写日志、`task_queue_init()` 二次初始化池容量缩水与 `on_frame_complete()` 最小帧长校验不严等隐患；`json_extract()` 拒绝超长非字符串截断，`sanitize_json_string()` 过滤 `>=0x7F` 字节。
+- `perf(core)`: `epoll_worker` / `packet_parser` / `conn_manager` 全面升级为 1024 桶 O(1) 哈希索引，消除 `on_frame_complete()` 每帧跨模块加锁；`ringbuffer` 改用双段 `memcpy`，`packet_parser` `STATE_WAIT_PAYLOAD` 批量读取；`handle_config()` 改用栈上 `packet_encode_raw()` 零堆分配并降低常规路径 `LOG_INFO`；开启 `TCP_NODELAY` 与 `FD_CLOEXEC`，支持命令行传参配置文件路径与自动创建单层日志目录。
+- `test(unit/integration)`: 全部集成与 soak 脚本支持 `IOT_GATEWAY_BIN` 环境变量并消除端口 `8084` 冲突；扩充 `unit_tests` / `unit_business` / `unit_task_queue` / `unit_fd_util` 用例。
+
 ## [1.0.1] - 2026-11-24
 
 稳定性与健壮性维护版本，完成全仓 P0/P1/P2 缺陷修复、单元测试扩充及工程文档规范化；Release / ASan / TSan 三构建 16/16 CTest 全绿。

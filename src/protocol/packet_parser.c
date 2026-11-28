@@ -76,8 +76,16 @@ struct parse_ctx {
  *    0xAA，解析器留在 WAIT_HEAD；下一个段提供 0x55 后解析继续。
  */
 
-/* 活跃解析器上下文的链表。 */
-static struct parse_ctx *g_ctx_list = NULL;
+/* 解析器上下文哈希表桶数（2 的幂，与连接池容量匹配）。 */
+#define PARSER_HASH_BUCKETS 1024u
+
+/* 活跃解析器上下文的开链哈希表（仅 epoll 线程访问，O(1) 查找/增删）。 */
+static struct parse_ctx *g_ctx_buckets[PARSER_HASH_BUCKETS];
+
+static size_t parser_bucket(int fd)
+{
+    return (size_t)(((unsigned int)fd) & (PARSER_HASH_BUCKETS - 1u));
+}
 
 /**
  * @brief 将解析器上下文重置为初始状态。
@@ -94,13 +102,17 @@ static void parser_reset(struct parse_ctx *ctx)
 }
 
 /**
- * @brief 按文件描述符查找解析器上下文。
+ * @brief 按文件描述符查找解析器上下文（O(1) 哈希桶）。
  */
 static struct parse_ctx *parser_find(int fd)
 {
     struct parse_ctx *ctx;
 
-    for (ctx = g_ctx_list; ctx != NULL; ctx = ctx->next) {
+    if (fd < 0) {
+        return NULL;
+    }
+
+    for (ctx = g_ctx_buckets[parser_bucket(fd)]; ctx != NULL; ctx = ctx->next) {
         if (ctx->fd == fd) {
             return ctx;
         }
@@ -111,17 +123,20 @@ static struct parse_ctx *parser_find(int fd)
 
 int packet_parser_register(int fd, struct parse_ctx **ctx)
 {
+    struct parse_ctx *existing;
     struct parse_ctx *new_ctx;
+    size_t bucket;
 
     if (fd < 0) {
         errno = EINVAL;
         return -1;
     }
 
-    if (parser_find(fd) != NULL) {
+    existing = parser_find(fd);
+    if (existing != NULL) {
         /* 已注册。 */
         if (ctx != NULL) {
-            *ctx = parser_find(fd);
+            *ctx = existing;
         }
         return 0;
     }
@@ -138,8 +153,9 @@ int packet_parser_register(int fd, struct parse_ctx **ctx)
     }
     parser_reset(new_ctx);
 
-    new_ctx->next = g_ctx_list;
-    g_ctx_list = new_ctx;
+    bucket = parser_bucket(fd);
+    new_ctx->next = g_ctx_buckets[bucket];
+    g_ctx_buckets[bucket] = new_ctx;
 
     if (ctx != NULL) {
         *ctx = new_ctx;
@@ -157,7 +173,7 @@ void packet_parser_unregister(int fd)
         return;
     }
 
-    pp = &g_ctx_list;
+    pp = &g_ctx_buckets[parser_bucket(fd)];
     while (*pp != NULL) {
         cur = *pp;
         if (cur->fd == fd) {
@@ -310,6 +326,47 @@ static void parser_run(struct parse_ctx *ctx)
     }
 
     while (rb_used(&ctx->rb) > 0) {
+        /*
+         * 设计说明（PAYLOAD 阶段批量拷贝）：
+         *   WAIT_HEAD / WAIT_LEN / WAIT_CRC 每次仅需 1~2 字节，逐字节驱动
+         *   状态机保证跨段粘包/拆包与自同步；进入 WAIT_PAYLOAD 后已知确切
+         *   剩余长度（1B cmd + expected_len），直接从 RingBuffer 批量 rb_read
+         *   进 temp_buf（双重校验 target <= sizeof(ctx->temp_buf)），消除每帧
+         *   数百次单字节函数调用。
+         */
+        if (ctx->state == STATE_WAIT_PAYLOAD) {
+            size_t target = 4u + 1u + (size_t)ctx->expected_len;
+            size_t avail;
+            size_t remain;
+            size_t chunk;
+
+            if (target > sizeof(ctx->temp_buf)) {
+                LOG_ERROR("parser: fd=%d temp_buf overflow, reset", ctx->fd);
+                parser_reset(ctx);
+                continue;
+            }
+
+            if (ctx->recv_offset < target) {
+                avail = rb_used(&ctx->rb);
+                remain = target - ctx->recv_offset;
+                chunk = avail < remain ? avail : remain;
+                if (chunk > 0) {
+                    size_t got = rb_read(&ctx->rb,
+                                         &ctx->temp_buf[ctx->recv_offset],
+                                         chunk);
+                    if (got == 0) {
+                        break;
+                    }
+                    ctx->recv_offset += got;
+                }
+            }
+
+            if (ctx->recv_offset >= target) {
+                ctx->state = STATE_WAIT_CRC;
+            }
+            continue;
+        }
+
         if (rb_read(&ctx->rb, &byte, 1) != 1) {
             break;
         }

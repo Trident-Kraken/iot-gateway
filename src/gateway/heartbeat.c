@@ -16,8 +16,9 @@
 #include "gateway/epoll_worker.h"
 #include "utils/logger.h"
 
-/* 单次扫描中关闭的最大过期连接数。*/
-#define HEARTBEAT_BATCH_SIZE 256
+/* 单批关闭上限（48 * ~1KB < 64KB 管道，为并发 CMD_CONFIG 下行留余量）。 */
+#define HEARTBEAT_BATCH_SIZE       48
+#define HEARTBEAT_MAX_DRAIN_ROUNDS 24
 
 /* 单个待关闭连接：fd + 代际号，避免 fd 复用后误关新连接。 */
 struct stale_entry {
@@ -39,6 +40,18 @@ static int g_interval_sec = 5;
 static int g_timeout_sec = 15;
 static int g_started = 0;
 
+/* 与 conn_manager 保持同一 CLOCK_MONOTONIC 时基，免疫墙上时钟跳变。 */
+static time_t monotonic_sec(void)
+{
+    struct timespec ts;
+
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) == 0) {
+        return ts.tv_sec;
+    }
+
+    return time(NULL);
+}
+
 /**
  * @brief conn_manager_foreach() 的回调：收集过期文件描述符。
  *
@@ -53,12 +66,8 @@ static void collect_stale(struct conn_entry *entry, void *arg)
         return;
     }
 
-    if ((time_t)ctx->timeout_sec > ctx->now) {
-        /* 防御性：如果时钟跳跃会下溢。*/
-        return;
-    }
-
-    if (ctx->now - entry->last_active > (time_t)ctx->timeout_sec) {
+    if (ctx->now > entry->last_active &&
+        (ctx->now - entry->last_active) > (time_t)ctx->timeout_sec) {
         ctx->entries[ctx->count].fd = entry->fd;
         ctx->entries[ctx->count].generation = entry->generation;
         ctx->count++;
@@ -97,6 +106,7 @@ static void *heartbeat_thread(void *arg)
     while (atomic_load(&g_running)) {
         struct stale_collect_ctx ctx;
         size_t i;
+        int round;
 
         heartbeat_sleep((unsigned int)g_interval_sec);
 
@@ -104,29 +114,45 @@ static void *heartbeat_thread(void *arg)
             break;
         }
 
-        ctx.count = 0;
-        ctx.now = time(NULL);
-        ctx.timeout_sec = g_timeout_sec;
-
-        /*
-         * 锁粒度：仅在链表遍历和fd 收集期间持有 conn_manager 锁。         * 实际的close() 调用在锁外执行，以避免释放内核资源时阻塞
-         * epoll 线程。         */
-        conn_manager_foreach(collect_stale, &ctx);
-
-        for (i = 0; i < ctx.count; i++) {
-            struct stale_entry *se = &ctx.entries[i];
-
-            LOG_INFO("heartbeat: closing inactive fd=%d (gen=%llu, timeout %ds)",
-                     se->fd, (unsigned long long)se->generation,
-                     g_timeout_sec);
+        for (round = 0;
+             round < HEARTBEAT_MAX_DRAIN_ROUNDS && atomic_load(&g_running);
+             round++) {
+            ctx.count = 0;
+            ctx.now = monotonic_sec();
+            ctx.timeout_sec = g_timeout_sec;
 
             /*
-             * Delegate to the epoll thread via self-pipe: it will perform
-             * full cleanup (parser unregister, conn_manager remove,
-             * connection struct free, close) without racing with I/O.
-             * generation 由 epoll 线程双重匹配，fd 复用后不会误关新连接。
+             * 锁粒度：仅在链表遍历和 fd 收集期间持有 conn_manager 锁。
+             * 实际的 close() 调用在锁外执行，以避免释放内核资源时阻塞
+             * epoll 线程。
              */
-            epoll_worker_request_close(se->fd, se->generation);
+            conn_manager_foreach(collect_stale, &ctx);
+
+            for (i = 0; i < ctx.count; i++) {
+                struct stale_entry *se = &ctx.entries[i];
+
+                LOG_INFO("heartbeat: closing inactive fd=%d (gen=%llu, timeout %ds)",
+                         se->fd, (unsigned long long)se->generation,
+                         g_timeout_sec);
+
+                /*
+                 * Delegate to the epoll thread via self-pipe: it will perform
+                 * full cleanup (parser unregister, conn_manager remove,
+                 * connection struct free, close) without racing with I/O.
+                 * generation 由 epoll 线程双重匹配，fd 复用后不会误关新连接。
+                 */
+                epoll_worker_request_close(se->fd, se->generation);
+            }
+
+            if (ctx.count < HEARTBEAT_BATCH_SIZE) {
+                break;
+            }
+
+            /* 本批已满：短睡 20ms 让 epoll 排空管道后再继续下一批。 */
+            {
+                struct timespec ts = { 0, 20 * 1000 * 1000 };
+                nanosleep(&ts, NULL);
+            }
         }
     }
 
