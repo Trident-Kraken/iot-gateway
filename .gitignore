@@ -33,10 +33,5 @@ Testing/
 # ---- 抓包文件 ----
 *.pcap
 
-# ---- Local tooling ----
-.agents/
-.specify/
-.codex/
-
 # ---- 压测生成报告 ----
 tests/stress_report.txt

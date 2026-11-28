@@ -13,6 +13,9 @@
 - `perf(pipeline)`: `business_handler` 改用 `memchr()` 向量化查找、`JSON_EXTRACT_LIT` 编译期键长度与零 `snprintf` 分段 `memcpy` 组装；`epoll_worker` 保存直连 `parse_ctx*` 指针走 `packet_parser_feed_ctx()` 并消除重复 `fcntl`；`packet_parser` 批量跳过前导垃圾并按状态批量读取 `LEN`/`CRC`；`task_queue` 仅在 `g_waiters > 0` 时调用 `pthread_cond_signal`；`mqtt_client` 离线缓存改用单块连续分配减少 50% 堆分配。
 - `feat(observability)`: 新增全链路无锁/低开销统计接口与 `SIGUSR1` 运行时统计快照（停机时自动汇总），新增运维诊断脚本 `tools/gateway_stats.sh`。
 - `test(unit/integration)`: 全部集成与 soak 脚本支持 `IOT_GATEWAY_BIN` 环境变量并消除端口 `8084` 冲突；扩充 `unit_tests` / `unit_business` / `unit_task_queue` / `unit_fd_util` 用例与 `shell_syntax_check`。
+- `fix(gateway/signals)`: 后台线程启动前通过 `pthread_sigmask` 屏蔽异步信号，将 `SIGTERM`/`SIGINT`/`SIGUSR1` 收敛至 epoll 主线程处理；调整事件循环统计与停机检测顺序，`tools/gateway_stats.sh` 改为日志计数增量等待并在生命周期集成测试中端到端验证。
+- `refactor(parser)`: 合并 `packet_parser` `parser_consume_byte()` 与 `parser_run()` 批量状态分支消除不可达死代码，补充重叠/伪帧头滑动同步单测。
+- `docs/chore`: 同步 `README`/CI/架构与协议文档（17/17 用例口径、流式批量拆包、`packet_encode_raw()`、`rand_r` 等）并补充首页文档导航；移除冗余 `.gitkeep` 与仓库 `.gitignore` 中的本地工具规则。
 
 ## [1.0.1] - 2026-11-24
 

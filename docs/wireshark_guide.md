@@ -180,21 +180,21 @@ MQ Telemetry Transport Protocol, Connect Command
 
 ---
 
-## 6. 截图保存建议
+## 6. 本地抓包归档检查项
 
-至少保存 **4 张**截图，按数据流向覆盖完整验证链路：
+如需保留本地抓包与演示材料（如写入 `/tmp/` 或个人归档目录，不纳入 Git 仓库），建议覆盖以下 4 个视图：
 
-| 截图编号 | 内容 | Wireshark 视图 |
+| 序号 | 内容 | Wireshark 视图 |
 |---|---|---|
 | ① | TCP 三次握手 | Filter: `tcp.port == 8080 and tcp.flags != 0`，展开前 3 个报文 |
 | ② | 自定义协议帧 Hex Dump | Follow TCP Stream → Hex Dump，标出 `AA 55` 帧头 |
 | ③ | MQTT CONNECT 报文 | Filter: `mqtt`，展开第一条 Connect Command |
 | ④ | MQTT PUBLISH 报文 | Filter: `mqtt`，展开一条 Publish Message，显示 Topic 和 Payload |
 
-截图命名建议：
+文件命名示例（`/tmp/`）：
 
 ```
-screenshots/
+/tmp/
 ├── 01_tcp_handshake.png
 ├── 02_custom_frame_hex.png
 ├── 03_mqtt_connect.png
@@ -212,8 +212,8 @@ sudo tshark -i lo -f "tcp port 8080 or tcp port 1883" -w /tmp/iot-demo.pcap
 # 2. 另一个终端：启动 Mosquitto Broker
 sudo systemctl start mosquitto
 
-# 3. 启动网关
-cd ~/projects/iot-gateway && ./build/src/iot-gateway
+# 3. 启动网关（仓库根目录执行）
+./build/src/iot-gateway
 
 # 4. 另一个终端：启动模拟器
 python3 tests/integration/device_simulator.py --host 127.0.0.1 --port 8080 --devices 1 --freq 2

@@ -24,7 +24,7 @@ jobs:
         run: cmake --build build
 
       - name: CTest (unit + integration)
-        # 单测/自检 9 项 + 集成 7 项（E2E/连接生命周期/MQTT 离线缓存/
+        # 单测/自检 10 项 + 集成 7 项（E2E/连接生命周期/MQTT 离线缓存/
         # 配置校验/故障注入/超时关闭竞态回归/fd 耗尽处理）；
         # 依赖缺失或环境受限时用例返回 77 被跳过。
         run: ctest --test-dir build --output-on-failure

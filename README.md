@@ -74,7 +74,7 @@ mqtt_publish 失败/未连接 → 有界离线缓存（512 条，满淘汰最旧
 
 | Verification | Result |
 |---|---|
-| CTest | **16/16 PASS**（9 单测/自检 + 7 集成；ASan / TSan 构建同为 16/16，零报告） |
+| CTest | **17/17 PASS**（10 单测/自检 + 7 集成；ASan+UBSan+LSan / TSan 构建同为 17/17，零报告） |
 | Valgrind | 0 leaks / 0 errors（unit_tests；全量另经 ASan+LeakSanitizer 覆盖） |
 | Stress | 100 connections × 10 fps × 60s，客户端发送速率 **988~991 帧/秒**（目标 1000，达成率 >98.8%） |
 | RTT Probe (0x03) | 负载下配置请求 RTT P99 **5.73 ms**（60/60 成功率 100%，覆盖全链路处理与下行回显） |
@@ -119,7 +119,7 @@ python3 tests/integration/stress_test.py -c 100 -f 10 -d 60 --probe-interval 1.0
 ## 测试
 
 ```bash
-# 1. 单元测试 + 集成测试（共 16 项：9 单测/自检 + 7 集成；集成依赖 mosquitto，环境受限时自动跳过）
+# 1. 单元测试 + 集成测试（共 17 项：10 单测/自检 + 7 集成；集成依赖 mosquitto，环境受限时自动跳过）
 ctest --test-dir build --output-on-failure
 
 # 2. 集成用例单独运行（等价于 ctest 中的 integration_* 用例）
@@ -145,6 +145,15 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DCMAKE_C_FLAGS="-fsanitize=address
 > 退出码约定：集成脚本 `0` 通过、`1` 失败、`77` 环境不满足（CTest 标记为 Skipped，不误报失败）。
 > 完整结果见 [docs/test-report.md](docs/test-report.md)。
 
+## 文档导航
+
+- [架构设计](docs/architecture.md)：线程模型、锁粒度边界、陈旧事件防护、停机生命周期与可靠性矩阵
+- [协议设计](docs/protocol-design.md)：二进制帧布局、CRC16-CCITT-FALSE、五态拆包状态机与 `CMD_CONFIG` 下行
+- [设计权衡](docs/design-qa.md)：epoll ET、per-conn RingBuffer、self-pipe + generation 等关键技术决策
+- [部署与运维](docs/deployment.md)：环境依赖、构建配置、`SIGUSR1` 统计快照与优雅停机
+- [测试报告](docs/test-report.md)：Release / ASan+UBSan+LSan / TSan 回归数据、30 分钟 soak 与 `0x03` RTT 基准
+- [抓包验证指南](docs/wireshark_guide.md)：`tshark` / Wireshark 验证 TCP 握手、自定义二进制帧与 MQTT 报文
+
 ## 项目结构
 
 ```
@@ -164,7 +173,7 @@ iot-gateway/
 ├── src/                        # 实现文件，与 include/ 分组镜像
 │   ├── gateway/  protocol/  business/  utils/
 ├── tests/
-│   ├── unit/                   # C 单元测试（协议/环形缓冲/状态机）
+│   ├── unit/                   # C 单元测试（协议/环形缓冲/状态机/配置/队列/线程池/业务处理）
 │   └── integration/            # Python 设备模拟器 + 压测脚本 + CTest 自检用例
 ├── tools/                      # 运维/调试辅助脚本（gateway_stats.sh 运行时指标快照）
 ├── docs/                       # 架构、协议设计、部署、压测报告、Wireshark 指南等

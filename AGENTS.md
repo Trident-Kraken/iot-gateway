@@ -86,7 +86,7 @@ iot-gateway/
 | ringbuffer | `include/utils/ringbuffer.h` | `src/utils/ringbuffer.c` | 每连接独立的 SPSC 循环缓冲区 |
 | packet_parser | `include/protocol/packet_parser.h` | `src/protocol/packet_parser.c` | 五态二进制协议状态机拆包 |
 | protocol | `include/protocol/protocol.h` | `src/protocol/protocol.c` | 帧编解码与编译期表驱动 CRC16-CCITT-FALSE |
-| conn_manager | `include/gateway/conn_manager.h` | `src/gateway/conn_manager.c` | 活跃连接链表、generation 管理、两段式遍历回调 |
+| conn_manager | `include/gateway/conn_manager.h` | `src/gateway/conn_manager.c` | 1024 桶连接哈希表、`CLOCK_MONOTONIC` 活跃时间、`generation` 管理、两段式遍历回调 |
 | heartbeat | `include/gateway/heartbeat.h` | `src/gateway/heartbeat.c` | 独立心跳扫描线程（可中断睡眠），超时委托 epoll 线程关闭 |
 | task_queue | `include/utils/task_queue.h` | `src/utils/task_queue.c` | 线程安全有界任务队列（2048 节点对象池） |
 | threadpool | `include/utils/threadpool.h` | `src/utils/threadpool.c` | 固定数量工作线程与优雅退出 |

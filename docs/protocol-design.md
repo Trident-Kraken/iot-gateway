@@ -50,7 +50,7 @@
 
 ## 4. 粘包/拆包状态机
 
-`packet_parser` 在 epoll I/O 线程逐字节消费每连接独立的 RingBuffer：
+`packet_parser` 在 epoll I/O 线程通过流式状态机消费每连接独立的 RingBuffer（前导非帧头批量跳过 + 按状态批量读取）：
 
 ```
 WAIT_HEAD → WAIT_LEN → WAIT_PAYLOAD → WAIT_CRC → FRAME_COMPLETE
@@ -111,7 +111,7 @@ AA 55 00 4C 01 7B 22 64 65 76 69 63 65 5F 69 64 22 3A 20 22 64 65 76 2D 30 30 31
 - 设备发送 `0x03` 帧（Payload 通常为空，表示「请求我的配置」）。
 - 网关 `business_handler` 的 `handle_config()` 打包默认配置 JSON
   （`{"sampling_interval":5,"upload_freq":2,"heartbeat_interval":5}`），
-  用 `packet_encode()` 编码为 `0x03` 帧。
+  用栈上零堆分配的 `packet_encode_raw()` 编码为 `0x03` 帧。
 - 下行帧经 self-pipe 委托 **epoll 线程**发送（`epoll_worker_request_send()`），
   非阻塞 + `MSG_NOSIGNAL`，并携带 fd + generation 双重匹配，连接已关闭或 fd 被
   新连接复用时静默丢弃（best-effort，可重发）。
