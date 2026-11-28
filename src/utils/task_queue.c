@@ -187,14 +187,9 @@ struct task *task_queue_pop(void)
     pthread_mutex_lock(&g_mutex);
 
     /*
-     * 为什么用 while 循环而不是 if？
-     *
-     * POSIX 允许 pthread_cond_wait() 因显式 signal 或 broadcast 以外的
-     * 原因返回（虚假唤醒）。它也可能因为多个线程被唤醒，而另一个线程在
-     * 本线程重新获取互斥锁之前消费了唯一可用的任务。
-     *
-     * 使用 'if' 会让线程在队列可能仍然为空时继续执行，导致 NULL 指针解
-     * 引用。使用 'while' 在每次唤醒后在互斥锁下重新检查条件。
+     * 必须在 g_mutex 下用 while 循环重检条件：POSIX 允许 pthread_cond_wait()
+     * 发生虚假唤醒，且多工作线程竞争下先醒来的线程可能已消费唯一任务，若用 if
+     * 会在空队列上继续执行导致 NULL 解引用。
      */
     while (g_head == NULL && !g_shutdown) {
         g_waiters++;

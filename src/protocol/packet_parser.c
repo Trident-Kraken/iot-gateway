@@ -192,120 +192,6 @@ void packet_parser_unregister(int fd)
 }
 
 /**
- * @brief 从 RingBuffer 消费一个字节并驱动状态机。
- *
- * @param ctx  解析器上下文。
- * @param byte 来自 RingBuffer 的下一个字节。
- *
- * @return 帧完成时返回 1，否则返回 0。
- */
-static int parser_consume_byte(struct parse_ctx *ctx, uint8_t byte)
-{
-    /*
-     * 硬件级防护：如果累积偏移量达到 temp_buf 的实际大小，说明出了问题
-     *（例如 PARSER_MAX_PAYLOAD_LEN 和 PARSER_MAX_FRAME_SIZE 不一致）。
-     * 重置状态机以避免缓冲区写入越界。
-     */
-   if (ctx->recv_offset >= sizeof(ctx->temp_buf)) {
-        LOG_ERROR("parser: fd=%d temp_buf overflow, reset", ctx->fd);
-       parser_reset(ctx);
-       return 0;
-    }
-
-    switch (ctx->state) {
-    case STATE_WAIT_HEAD:
-        /*
-         * 需要两个帧头字节：0xAA 0x55。recv_offset 跟踪已存储的帧头
-         * 字节数。
-         */
-        if (ctx->recv_offset == 0) {
-            if (byte == PACKET_HEADER_0) {
-                ctx->temp_buf[0] = byte;
-                ctx->recv_offset = 1;
-            }
-            /* 在等待 0xAA 期间任何其他字节都被忽略。 */
-        } else { /* recv_offset == 1，等待 0x55 */
-            if (byte == PACKET_HEADER_1) {
-                ctx->temp_buf[1] = byte;
-                ctx->recv_offset = 2;
-                ctx->state = STATE_WAIT_LEN;
-            } else if (byte == PACKET_HEADER_0) {
-                /* 0xAA 后跟另一个 0xAA：保留新的 0xAA。 */
-                ctx->temp_buf[0] = byte;
-                ctx->recv_offset = 1;
-            } else {
-                /* 帧头损坏，重新开始。 */
-                parser_reset(ctx);
-            }
-        }
-        break;
-
-    case STATE_WAIT_LEN:
-        /*
-         * 将 2 字节大端 Payload 长度累加到 temp_buf[2:3]。
-         */
-        ctx->temp_buf[ctx->recv_offset++] = byte;
-
-        if (ctx->recv_offset == 4) {
-            ctx->expected_len = (uint16_t)((ctx->temp_buf[2] << 8) |
-                                           ctx->temp_buf[3]);
-
-            /* 防御恶意或损坏的长度字段。 */
-           if (ctx->expected_len > PARSER_MAX_PAYLOAD_LEN) {
-                LOG_ERROR("parser: fd=%d excessive payload len %u, reset",
-                          ctx->fd, (unsigned int)ctx->expected_len);
-                atomic_fetch_add_explicit(&g_len_errors, 1,
-                                          memory_order_relaxed);
-               parser_reset(ctx);
-               break;
-            }
-
-            ctx->state = STATE_WAIT_PAYLOAD;
-        }
-        break;
-
-    case STATE_WAIT_PAYLOAD:
-        /*
-         * 需要命令字（1）加上 Payload（expected_len）。
-         * 它们从 temp_buf[4] 开始存放。
-         */
-        ctx->temp_buf[ctx->recv_offset++] = byte;
-
-        if (ctx->recv_offset >= 4u + 1u + ctx->expected_len) {
-            ctx->state = STATE_WAIT_CRC;
-        }
-        break;
-
-    case STATE_WAIT_CRC:
-        /* 在帧末尾累加 2 字节的 CRC。 */
-        ctx->temp_buf[ctx->recv_offset++] = byte;
-
-        if (ctx->recv_offset >= 4u + 1u + ctx->expected_len + 2u) {
-            size_t frame_len;
-
-            frame_len = ctx->recv_offset;
-
-            if (packet_checksum_verify(ctx->temp_buf, frame_len) == 1) {
-                ctx->state = STATE_FRAME_COMPLETE;
-                return 1;
-            }
-
-            LOG_ERROR("parser: fd=%d CRC mismatch, drop frame", ctx->fd);
-            atomic_fetch_add_explicit(&g_crc_errors, 1, memory_order_relaxed);
-            parser_reset(ctx);
-        }
-        break;
-
-    case STATE_FRAME_COMPLETE:
-        /* 不应到达此处；安全起见重置。 */
-        parser_reset(ctx);
-        break;
-    }
-
-    return 0;
-}
-
-/**
  * @brief 递送一个完成的帧并重置解析器。
  */
 static void parser_deliver_frame(struct parse_ctx *ctx)
@@ -329,8 +215,6 @@ static void parser_deliver_frame(struct parse_ctx *ctx)
  */
 static void parser_run(struct parse_ctx *ctx)
 {
-    uint8_t byte;
-
     if (ctx == NULL) {
         return;
     }
@@ -339,31 +223,56 @@ static void parser_run(struct parse_ctx *ctx)
         /*
          * 设计说明（批量同步与拷贝优化）：
          *   1. WAIT_HEAD(offset=0) 遇到大段非 0xAA 垃圾数据时，先通过 rb_peek +
-         *      memchr 跳过整段前导垃圾；
+         *      memchr 跳过整段前导垃圾，命中 0xAA 后一并消费；
          *   2. WAIT_LEN / WAIT_PAYLOAD / WAIT_CRC 已知确切剩余字节数，直接批量
-         *      rb_read 进 temp_buf（配合 sizeof(temp_buf) 双边界校验），减少单字节
-         *      函数调用开销，同时严格维持五态迁移与跨段拆包语义。
+         *      rb_read 进 temp_buf（配合 sizeof(temp_buf) 双边界校验），减少函数
+         *      调用开销，同时严格维持五态迁移与跨段拆包语义。
          */
-        if (ctx->state == STATE_WAIT_HEAD && ctx->recv_offset == 0) {
-            uint8_t peek_buf[64];
-            size_t n = rb_peek(&ctx->rb, peek_buf, sizeof(peek_buf));
-            const uint8_t *hit;
-            size_t skip;
+        switch (ctx->state) {
+        case STATE_WAIT_HEAD:
+            if (ctx->recv_offset == 0) {
+                uint8_t peek_buf[64];
+                size_t n = rb_peek(&ctx->rb, peek_buf, sizeof(peek_buf));
+                const uint8_t *hit;
+                size_t skip;
 
-            if (n == 0) {
-                break;
+                if (n == 0) {
+                    return;
+                }
+                hit = memchr(peek_buf, PACKET_HEADER_0, n);
+                if (hit == NULL) {
+                    (void)rb_read(&ctx->rb, peek_buf, n);
+                    break;
+                }
+                skip = (size_t)(hit - peek_buf);
+                if (rb_read(&ctx->rb, peek_buf, skip + 1u) != skip + 1u) {
+                    return;
+                }
+                ctx->temp_buf[0] = PACKET_HEADER_0;
+                ctx->recv_offset = 1u;
+            } else if (ctx->recv_offset == 1u) {
+                uint8_t byte;
+
+                if (rb_read(&ctx->rb, &byte, 1u) != 1u) {
+                    return;
+                }
+                if (byte == PACKET_HEADER_1) {
+                    ctx->temp_buf[1] = byte;
+                    ctx->recv_offset = 2u;
+                    ctx->state = STATE_WAIT_LEN;
+                } else if (byte == PACKET_HEADER_0) {
+                    /* 0xAA 后跟另一个 0xAA：保留新的 0xAA 作为候选帧头。 */
+                    ctx->temp_buf[0] = byte;
+                    ctx->recv_offset = 1u;
+                } else {
+                    parser_reset(ctx);
+                }
+            } else {
+                parser_reset(ctx);
             }
-            hit = memchr(peek_buf, PACKET_HEADER_0, n);
-            if (hit == NULL) {
-                (void)rb_read(&ctx->rb, peek_buf, n);
-                continue;
-            }
-            skip = (size_t)(hit - peek_buf);
-            if (skip > 0) {
-                (void)rb_read(&ctx->rb, peek_buf, skip);
-                continue;
-            }
-        } else if (ctx->state == STATE_WAIT_LEN) {
+            break;
+
+        case STATE_WAIT_LEN: {
             size_t remain = 4u - ctx->recv_offset;
             size_t avail = rb_used(&ctx->rb);
             size_t chunk = avail < remain ? avail : remain;
@@ -372,7 +281,7 @@ static void parser_run(struct parse_ctx *ctx)
                 size_t got = rb_read(&ctx->rb,
                                      &ctx->temp_buf[ctx->recv_offset], chunk);
                 if (got == 0) {
-                    break;
+                    return;
                 }
                 ctx->recv_offset += got;
             }
@@ -389,8 +298,10 @@ static void parser_run(struct parse_ctx *ctx)
                     ctx->state = STATE_WAIT_PAYLOAD;
                 }
             }
-            continue;
-        } else if (ctx->state == STATE_WAIT_PAYLOAD) {
+            break;
+        }
+
+        case STATE_WAIT_PAYLOAD: {
             size_t target = 4u + 1u + (size_t)ctx->expected_len;
             size_t avail;
             size_t remain;
@@ -399,7 +310,7 @@ static void parser_run(struct parse_ctx *ctx)
             if (target > sizeof(ctx->temp_buf)) {
                 LOG_ERROR("parser: fd=%d temp_buf overflow, reset", ctx->fd);
                 parser_reset(ctx);
-                continue;
+                break;
             }
 
             if (ctx->recv_offset < target) {
@@ -411,7 +322,7 @@ static void parser_run(struct parse_ctx *ctx)
                                          &ctx->temp_buf[ctx->recv_offset],
                                          chunk);
                     if (got == 0) {
-                        break;
+                        return;
                     }
                     ctx->recv_offset += got;
                 }
@@ -420,8 +331,10 @@ static void parser_run(struct parse_ctx *ctx)
             if (ctx->recv_offset >= target) {
                 ctx->state = STATE_WAIT_CRC;
             }
-            continue;
-        } else if (ctx->state == STATE_WAIT_CRC) {
+            break;
+        }
+
+        case STATE_WAIT_CRC: {
             size_t target = 4u + 1u + (size_t)ctx->expected_len + 2u;
             size_t avail;
             size_t remain;
@@ -430,7 +343,7 @@ static void parser_run(struct parse_ctx *ctx)
             if (target > sizeof(ctx->temp_buf)) {
                 LOG_ERROR("parser: fd=%d temp_buf overflow, reset", ctx->fd);
                 parser_reset(ctx);
-                continue;
+                break;
             }
 
             if (ctx->recv_offset < target) {
@@ -442,7 +355,7 @@ static void parser_run(struct parse_ctx *ctx)
                                          &ctx->temp_buf[ctx->recv_offset],
                                          chunk);
                     if (got == 0) {
-                        break;
+                        return;
                     }
                     ctx->recv_offset += got;
                 }
@@ -459,15 +372,13 @@ static void parser_run(struct parse_ctx *ctx)
                     parser_reset(ctx);
                 }
             }
-            continue;
-        }
-
-        if (rb_read(&ctx->rb, &byte, 1) != 1) {
             break;
         }
 
-        if (parser_consume_byte(ctx, byte)) {
-            parser_deliver_frame(ctx);
+        case STATE_FRAME_COMPLETE:
+        default:
+            parser_reset(ctx);
+            break;
         }
     }
 }

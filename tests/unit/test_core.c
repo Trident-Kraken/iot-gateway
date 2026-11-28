@@ -361,6 +361,20 @@ static void test_packet_parser(void)
         CHECK(after.crc_errors == before.crc_errors + 1);
         CHECK(after.len_errors == before.len_errors + 1);
 
+        /* 重叠帧头（0xAA 0xAA 0x55）与伪帧头（0xAA 0x12）滑动自同步校验。 */
+        {
+            uint8_t sync_seq[4 + PROTOCOL_MAX_FRAME_SIZE];
+
+            g_frame_count = 0;
+            sync_seq[0] = PACKET_HEADER_0;
+            sync_seq[1] = 0x12;
+            sync_seq[2] = PACKET_HEADER_0;
+            memcpy(sync_seq + 3, frame2, len2);
+            CHECK(packet_parser_feed_ctx(ctx, sync_seq, 3 + len2) == 0);
+            CHECK(g_frame_count == 1);
+            CHECK(g_last_len == len2 && memcmp(g_last_frame, frame2, len2) == 0);
+        }
+
         packet_parser_unregister(8);
     }
 
